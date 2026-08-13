@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# Market data must never enter version control. Vendor files are hundreds of MB
+# per day and are licensed, not redistributable.
+# ---------------------------------------------------------------------------
+data/
+*.csv
+*.parquet
+*.arrow
+*.feather
+*.zip
+*.7z
+*.tar.gz
+*.vfd
+
+# Build
+build/
+out/
+cmake-build-*/
+_deps/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Backtest output
+runs/
+results/
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.vs/
+*.swp
+.DS_Store
+Thumbs.db
