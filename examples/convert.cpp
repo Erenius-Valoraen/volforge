@@ -67,10 +67,24 @@ int main(int argc, char** argv) {
         else { std::printf("unknown argument: %s\n", arg.c_str()); return 2; }
     }
 
+    // A directory of loose CSVs is one day. That is the salvage route for an
+    // archive whose central directory is gone: a tool that scans local headers
+    // can still recover the members even though nothing can open the zip itself.
+    bool csv_directory = false;
+
     std::vector<fs::path> archives;
     if (fs::is_directory(input)) {
         for (const auto& e : fs::recursive_directory_iterator(input)) {
             if (e.is_regular_file() && e.path().extension() == ".zip") archives.push_back(e.path());
+        }
+        if (archives.empty()) {
+            for (const auto& e : fs::directory_iterator(input)) {
+                if (e.is_regular_file() && e.path().extension() == ".csv") {
+                    csv_directory = true;
+                    break;
+                }
+            }
+            if (csv_directory) archives.emplace_back(input);
         }
     } else if (fs::is_regular_file(input)) {
         archives.emplace_back(input);
@@ -103,7 +117,8 @@ int main(int argc, char** argv) {
 
         GfdlDay day;
         try {
-            day = load_gfdl_zip(registry, archive.string(), options);
+            day = csv_directory ? load_gfdl_day(registry, archive.string(), options)
+                                : load_gfdl_zip(registry, archive.string(), options);
         } catch (const std::exception& e) {
             problems.push_back(archive.filename().string() + ": " + e.what());
             ++failed;
