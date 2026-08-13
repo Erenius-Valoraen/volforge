@@ -17,7 +17,7 @@ list(APPEND CMAKE_PREFIX_PATH "${nanobind_DIR}")
 find_package(nanobind CONFIG REQUIRED)
 
 nanobind_add_module(_volforge STABLE_ABI src/bindings.cpp)
-target_link_libraries(_volforge PRIVATE volforge::core)
+target_link_libraries(_volforge PRIVATE volforge::core volforge::adapters)
 
 # Drop the extension beside the Python package so `import volforge` works from
 # the source tree without an install step.

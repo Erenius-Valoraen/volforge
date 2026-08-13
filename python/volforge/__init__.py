@@ -54,6 +54,9 @@ __all__ = [
     "strategy",
     "backtest",
     "synthetic",
+    "load_gfdl",
+    "parse_symbol",
+    "describe",
     "BacktestConfig",
     "BarPrice",
     "Confirm",
@@ -93,35 +96,19 @@ def strategy(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
-class Data:
-    """A set of sessions to run against."""
+def _describe(dataset: Any) -> str:
+    d = dataset.dates
+    if not d:
+        return "Data(empty)"
+    span = f"{d[0]}" if len(d) == 1 else f"{d[0]} to {d[-1]}"
+    return f"Data({len(d)} session{'s' if len(d) != 1 else ''}, {span}, {dataset.instruments} instruments)"
 
-    def __init__(self, series: Any, registry: Any) -> None:
-        self._series = series
-        # The registry owns every instrument the sessions point at, so it has to
-        # outlive them. Holding it here is what keeps that true.
-        self._registry = registry
 
-    @property
-    def dates(self) -> list[Date]:
-        return list(self._series.dates)
-
-    @property
-    def expiries(self) -> list[Date]:
-        return list(self._series.expiries)
-
-    def __len__(self) -> int:
-        return len(self._series.dates)
-
-    def __repr__(self) -> str:
-        d = self._series.dates
-        if not d:
-            return "Data(empty)"
-        return f"Data({len(d)} sessions, {d[0]} to {d[-1]})"
+describe = _describe
 
 
 def synthetic(sessions: int = 10, *, seed: int = 7, strikes_each_side: int = 10,
-              step_seconds: int = 5, start: Date | None = None) -> Data:
+              step_seconds: int = 5, start: Date | None = None) -> Any:
     """Generated sessions, for development while real data is unavailable.
 
     Deliberately reproduces the awkward properties of a real feed rather than an
@@ -136,13 +123,28 @@ def synthetic(sessions: int = 10, *, seed: int = 7, strikes_each_side: int = 10,
     cfg.step_seconds = step_seconds
     if start is not None:
         cfg.start = start
-
-    registry = _core.InstrumentRegistry()
-    series = _core.make_synthetic_series(registry, cfg)
-    return Data(series, registry)
+    return _core.make_synthetic(cfg)
 
 
-def backtest(fn: Callable[..., Any], data: Data, *, config: BacktestConfig | None = None,
+def load_gfdl(directory: str, *, lot_size: int, only_underlying: str = "") -> Any:
+    """Loads one day of GFDL NFO tick CSVs.
+
+    ``lot_size`` is required rather than defaulted: the feed does not carry it,
+    it has changed over time (NIFTY has been 25, then 50, then 75), and getting
+    it wrong scales every position and every P&L figure by a constant.
+
+    Note that only symbols which *traded* that day have a file, so the instrument
+    universe is "strikes that traded", not "strikes that were listed".
+    """
+    return _core.load_gfdl(directory, lot_size, only_underlying)
+
+
+def parse_symbol(ticker: str) -> dict:
+    """Decomposes a vendor ticker such as ``NIFTY03JUL2523000CE.NFO``."""
+    return _core.parse_symbol(ticker)
+
+
+def backtest(fn: Callable[..., Any], data: Any, *, config: BacktestConfig | None = None,
              **params: Any) -> Any:
     """Runs a strategy across every session in ``data``.
 
@@ -169,5 +171,4 @@ def backtest(fn: Callable[..., Any], data: Data, *, config: BacktestConfig | Non
     def factory(ctx: Any) -> Any:
         return fn(ctx, **params)
 
-    return _core.run_backtest(data._series.source, data._series, factory,
-                              config or BacktestConfig())
+    return _core.run_backtest(data, factory, config or BacktestConfig())

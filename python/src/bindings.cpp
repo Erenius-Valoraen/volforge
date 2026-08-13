@@ -20,6 +20,7 @@
 // backtest has no other Python thread to unblock.
 
 #include "volforge/backtest.hpp"
+#include "volforge/gfdl_csv.hpp"
 #include "volforge/indicators.hpp"
 #include "volforge/synthetic.hpp"
 
@@ -31,6 +32,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace nb = nanobind;
@@ -103,6 +105,63 @@ StrategyFn make_strategy(nb::object factory) {
         }
         return drive_python(std::move(coro));
     };
+}
+
+// A loaded set of sessions plus everything needed to run against them.
+//
+// The registry is held here on purpose: sessions reference it rather than owning
+// it, so it has to outlive them, and tying its lifetime to the dataset is what
+// makes that true from Python.
+struct Dataset {
+    std::shared_ptr<InstrumentRegistry> registry = std::make_shared<InstrumentRegistry>();
+    std::shared_ptr<MemoryDataSource>   source;
+    UnderlyingId              underlying{};
+    InstrumentId              spot = InstrumentId::Invalid;
+    std::vector<Date>         dates;
+    std::vector<Date>         expiries;
+
+    std::size_t files_read = 0, files_skipped = 0, rows_read = 0, rows_skipped = 0;
+    std::vector<std::string> warnings;
+};
+
+std::shared_ptr<Dataset> make_synthetic(const SyntheticSeriesConfig& cfg) {
+    auto d = std::make_shared<Dataset>();
+    const SyntheticSeries s = make_synthetic_series(*d->registry, cfg);
+    d->source     = s.source;
+    d->underlying = s.underlying;
+    d->spot       = s.spot;
+    d->dates      = s.dates;
+    d->expiries   = s.expiries;
+    d->rows_read  = 0;
+    return d;
+}
+
+std::shared_ptr<Dataset> load_gfdl(const std::string& directory, Qty lot_size,
+                                   const std::string& only_underlying) {
+    auto d = std::make_shared<Dataset>();
+
+    GfdlLoadOptions opt;
+    opt.lot_size        = lot_size;
+    opt.only_underlying = only_underlying;
+
+    GfdlDay day = load_gfdl_day(*d->registry, directory, opt);
+    if (!day.session) {
+        throw std::runtime_error("no readable sessions found in " + directory);
+    }
+
+    d->underlying    = day.underlying;
+    d->spot          = InstrumentId::Invalid;   // the options feed carries no index
+    d->dates         = {day.date};
+    d->expiries      = day.expiries;
+    d->files_read    = day.files_read;
+    d->files_skipped = day.files_skipped;
+    d->rows_read     = day.rows_read;
+    d->rows_skipped  = day.rows_skipped;
+    d->warnings      = day.warnings;
+
+    d->source = std::make_shared<MemoryDataSource>(*d->registry);
+    d->source->add_session(day.session);
+    return d;
 }
 
 }  // namespace
@@ -460,21 +519,48 @@ NB_MODULE(_volforge, m) {
         .def_rw("step_seconds", &SyntheticSeriesConfig::step_seconds)
         .def_rw("seed", &SyntheticSeriesConfig::seed);
 
-    nb::class_<SyntheticSeries>(m, "SyntheticSeries")
-        .def_ro("source", &SyntheticSeries::source)
-        .def_ro("dates", &SyntheticSeries::dates)
-        .def_ro("expiries", &SyntheticSeries::expiries)
-        .def_prop_ro("spot", [](const SyntheticSeries& s) { return index_of(s.spot); });
+    nb::class_<Dataset>(m, "Dataset")
+        .def_ro("dates", &Dataset::dates)
+        .def_ro("expiries", &Dataset::expiries)
+        .def_ro("files_read", &Dataset::files_read)
+        .def_ro("files_skipped", &Dataset::files_skipped)
+        .def_ro("rows_read", &Dataset::rows_read)
+        .def_ro("rows_skipped", &Dataset::rows_skipped)
+        .def_ro("warnings", &Dataset::warnings)
+        .def_prop_ro("instruments", [](const Dataset& d) { return d.registry->size(); })
+        .def_prop_ro("has_spot", [](const Dataset& d) { return valid(d.spot); })
+        .def("__len__", [](const Dataset& d) { return d.dates.size(); })
+        .def("__repr__", [](const Dataset& d) {
+            if (d.dates.empty()) return std::string("Data(empty)");
+            const std::string span = d.dates.size() == 1
+                                         ? d.dates.front().to_string()
+                                         : d.dates.front().to_string() + " to " +
+                                               d.dates.back().to_string();
+            return "Data(" + std::to_string(d.dates.size()) + " sessions, " + span + ", " +
+                   std::to_string(d.registry->size()) + " instruments)";
+        });
 
-    m.def("make_synthetic_series", &make_synthetic_series, "registry"_a, "config"_a,
-          nb::rv_policy::move);
+    m.def("make_synthetic", &make_synthetic, "config"_a);
+    m.def("load_gfdl", &load_gfdl, "directory"_a, "lot_size"_a, "only_underlying"_a = "");
+
+    m.def("parse_symbol", [](const std::string& ticker) {
+        const ParsedSymbol s = parse_gfdl_symbol(ticker);
+        nb::dict d;
+        d["ok"] = s.ok;
+        if (s.ok) {
+            d["underlying"] = s.underlying;
+            d["expiry"] = s.expiry;
+            d["strike"] = s.strike.to_double();
+            d["right"] = s.right;
+        }
+        return d;
+    }, "ticker"_a);
 
     m.def(
         "run_backtest",
-        [](DataSource& source, const SyntheticSeries& series, nb::object strategy,
-           const BacktestConfig& config) {
-            return run_backtest(source, series.underlying, series.spot,
+        [](Dataset& data, nb::object strategy, const BacktestConfig& config) {
+            return run_backtest(*data.source, data.underlying, data.spot,
                                 make_strategy(std::move(strategy)), config);
         },
-        "source"_a, "series"_a, "strategy"_a, "config"_a);
+        "data"_a, "strategy"_a, "config"_a);
 }
