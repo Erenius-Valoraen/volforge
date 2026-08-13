@@ -39,6 +39,13 @@ are pure functions, so the engine verifies causality automatically by checking
 timeframes expose only *completed* bars, so the repainting class of bug has no entry point:
 reading a bar that is still forming requires writing `.forming` on purpose.
 
+**Fill resolution never inherits signal resolution.** A strategy may reason in hourly bars;
+execution always runs at the finest resolution the data provides. Stops are *orders*, not
+signals — attached to a position, armed continuously, and checked on every observation even
+while the strategy is awaiting something else entirely. An engine that checks stops at the
+strategy's timeframe exits an hourly strategy at the top of the hour, at a price nobody could
+have got.
+
 **Fills are pessimistic by default.** Source data is 1-second top-of-book snapshots, so
 sub-second queue position is unknowable and the engine never pretends otherwise. The
 default model crosses the spread and warns on fills in illiquid strikes.

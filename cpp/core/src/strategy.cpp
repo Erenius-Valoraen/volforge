@@ -142,19 +142,50 @@ Qty contracts_for(const InstrumentRegistry& reg, const std::vector<InstrumentId>
 
 }  // namespace
 
-std::optional<PositionId> Ctx::sell(const std::vector<InstrumentId>& legs, int lots,
+std::optional<PositionRef> Ctx::sell(const std::vector<InstrumentId>& legs, int lots,
+                                     std::string label) {
+    if (legs.empty()) return std::nullopt;
+    const Qty qty = contracts_for(registry(), legs, lots);
+    return PositionRef(this, portfolio_->submit_open(std::move(label), legs, Side::Sell, qty,
+                                                     now()));
+}
+
+std::optional<PositionRef> Ctx::buy(const std::vector<InstrumentId>& legs, int lots,
                                     std::string label) {
     if (legs.empty()) return std::nullopt;
     const Qty qty = contracts_for(registry(), legs, lots);
-    return portfolio_->submit_open(std::move(label), legs, Side::Sell, qty, now());
+    return PositionRef(this, portfolio_->submit_open(std::move(label), legs, Side::Buy, qty,
+                                                     now()));
 }
 
-std::optional<PositionId> Ctx::buy(const std::vector<InstrumentId>& legs, int lots,
-                                   std::string label) {
-    if (legs.empty()) return std::nullopt;
-    const Qty qty = contracts_for(registry(), legs, lots);
-    return portfolio_->submit_open(std::move(label), legs, Side::Buy, qty, now());
+// ---------------------------------------------------------------------------
+// Position handles
+// ---------------------------------------------------------------------------
+
+std::size_t PositionRef::leg_count() const {
+    return ctx_->portfolio().at(id_).legs().size();
 }
+
+void PositionRef::stop_loss(double pct) const {
+    ctx_->portfolio().attach_stop_loss(id_, std::nullopt, pct);
+}
+void PositionRef::take_profit(double pct) const {
+    ctx_->portfolio().attach_take_profit(id_, std::nullopt, pct);
+}
+void PositionRef::exit_at(std::string_view hhmm) const {
+    ctx_->portfolio().attach_exit_at(
+        id_, std::nullopt,
+        timestamp_of(ctx_->date(), parse_time_of_day(hhmm), kISTOffsetSeconds));
+}
+void PositionRef::close() const { ctx_->close(id_); }
+
+Cond PositionRef::closed() const { return ctx_->position_closed(id_); }
+Cond PositionRef::pnl_pct_at_most(double pct) const { return ctx_->pnl_pct_at_most(id_, pct); }
+Cond PositionRef::pnl_pct_at_least(double pct) const { return ctx_->pnl_pct_at_least(id_, pct); }
+
+void LegRef::stop_loss(double pct) const { ctx_->portfolio().attach_stop_loss(pos_, leg_, pct); }
+void LegRef::take_profit(double pct) const { ctx_->portfolio().attach_take_profit(pos_, leg_, pct); }
+void LegRef::close() const { ctx_->close_leg(pos_, leg_); }
 
 void Ctx::close(PositionId id) { portfolio_->submit_close(id, now()); }
 

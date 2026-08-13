@@ -132,7 +132,52 @@ execution_delay` — **never at the bar's open**, and never at the close price t
 produced the signal. Filling a close-confirmed signal at that bar's open is the
 classic version of this bug: it trades at 09:20:00 on information from 09:21:00.
 
-## 5. What the engine forbids
+## 5. Fill resolution never inherits signal resolution
+
+A strategy may reason in any timeframe it likes. **Execution always runs at the
+finest resolution the data provides**, and the two are entirely independent.
+
+This matters most for stops, because a stop is not a signal — it is an order that
+happens to be conditional. An engine that evaluates stops at the strategy's
+timeframe will exit an hourly strategy at the top of the hour, at a price nobody
+could have got, an average of half an hour after the level was breached. That
+single mistake can make a losing strategy look profitable.
+
+So risk rules are **attached to a position**, not awaited by the strategy:
+
+```python
+pos.stop_loss(pct=0.30)      # armed from here on, checked every observation
+pos.take_profit(pct=0.50)
+pos.exit_at("15:15")
+pos.call.stop_loss(pct=0.60) # this leg only
+```
+
+Two properties follow, and both are tested:
+
+**Armed continuously.** A strategy can attach a stop and then go and wait on
+something else entirely — an hourly bar close, a time hours away — and the stop
+stays live. A stop that is only checked while the strategy happens to be looking
+at it is not a stop.
+
+**Evaluated at base resolution.** A strategy signalling on hourly bars still has
+its stop checked on every observation. The test for this fires a stop at
+10:33:17 — deliberately neither an hour nor a minute boundary — while the
+strategy itself is awaiting an hourly-bar event.
+
+Rules are routed through the ordinary order path, so a stop is filled by the same
+fill model under the same timing guarantee as a discretionary exit: it crosses
+the spread, and it cannot fill on the observation that triggered it.
+
+### What a stop is *not*, on this data
+
+An attached stop is a **monitored** stop: the engine observes the breach and
+sends a market order. It is not a resting stop order at the exchange filling at
+the stop price. With 1-second top-of-book snapshots, intra-second dynamics are
+unknowable, so a resting stop cannot be simulated honestly — and a fill *at* the
+stop price would be exactly the flattering fiction this document exists to
+prevent.
+
+## 6. What the engine forbids
 
 - Reading a bar before its `close_time`, unless `.forming` is written explicitly.
 - Computing an indicator over the forming bar and using it intrabar.
@@ -141,7 +186,7 @@ classic version of this bug: it trades at 09:20:00 on information from 09:21:00.
 - A condition whose confirmation policy is ambiguous — `cross_above` on a bar
   series requires `confirm` to be stated.
 
-## 6. The detector
+## 7. The detector
 
 Rules are only worth what enforces them, so the engine ships a whole-strategy
 look-ahead check built on one theorem:
@@ -172,7 +217,7 @@ is worse than none, because it manufactures confidence.
 - A clean report means "no leak was observed at these cutoffs", never "this
   strategy is causal".
 
-## 7. Status
+## 8. Status
 
 Sections 1–4 and the detector are implemented and tested: bar timing, indicator
 knowability, both confirmation policies, order timing, and truncation-based

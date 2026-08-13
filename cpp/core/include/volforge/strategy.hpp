@@ -101,6 +101,7 @@ enum class Confirm : std::uint8_t {
 // ---------------------------------------------------------------------------
 
 class Ctx;
+class PositionRef;
 
 // The option chain for one expiry, as seen right now.
 //
@@ -128,6 +129,59 @@ private:
     const Ctx*         ctx_;
     Date               expiry_;
     std::vector<Price> strikes_;   // only those quoting at or before now
+};
+
+// ---------------------------------------------------------------------------
+// Position handles
+// ---------------------------------------------------------------------------
+
+// A leg within a position. Risk rules attached here affect only this leg and
+// leave the rest of the position live.
+class LegRef {
+public:
+    LegRef(Ctx* ctx, PositionId pos, std::size_t leg) : ctx_(ctx), pos_(pos), leg_(leg) {}
+
+    [[nodiscard]] std::size_t index() const { return leg_; }
+
+    void stop_loss(double pct) const;
+    void take_profit(double pct) const;
+    void close() const;
+
+private:
+    Ctx*        ctx_;
+    PositionId  pos_;
+    std::size_t leg_;
+};
+
+// A position, with risk rules that arm on attachment.
+//
+// Rules attached here are evaluated by the engine on every observation, at the
+// finest resolution the data provides — not at whatever timeframe the strategy
+// reasons in, and not only while the strategy happens to be awaiting them. A
+// strategy can attach a stop and then go and wait on something else entirely;
+// the stop stays armed.
+class PositionRef {
+public:
+    PositionRef(Ctx* ctx, PositionId id) : ctx_(ctx), id_(id) {}
+
+    [[nodiscard]] PositionId id() const { return id_; }
+    [[nodiscard]] std::size_t leg_count() const;
+    [[nodiscard]] LegRef leg(std::size_t i) const { return LegRef(ctx_, id_, i); }
+
+    // Combined-position rules. `pct` is a positive magnitude in both cases.
+    void stop_loss(double pct) const;
+    void take_profit(double pct) const;
+    void exit_at(std::string_view hhmm) const;
+
+    void close() const;
+
+    [[nodiscard]] Cond closed() const;
+    [[nodiscard]] Cond pnl_pct_at_most(double pct) const;
+    [[nodiscard]] Cond pnl_pct_at_least(double pct) const;
+
+private:
+    Ctx*       ctx_;
+    PositionId id_;
 };
 
 // ---------------------------------------------------------------------------
@@ -169,10 +223,10 @@ public:
 
     // --- orders -----------------------------------------------------------
 
-    std::optional<PositionId> sell(const std::vector<InstrumentId>& legs, int lots,
+    std::optional<PositionRef> sell(const std::vector<InstrumentId>& legs, int lots,
+                                    std::string label = "position");
+    std::optional<PositionRef> buy(const std::vector<InstrumentId>& legs, int lots,
                                    std::string label = "position");
-    std::optional<PositionId> buy(const std::vector<InstrumentId>& legs, int lots,
-                                  std::string label = "position");
     void close(PositionId id);
     void close_leg(PositionId id, std::size_t leg_index);
 

@@ -16,10 +16,10 @@ StrategyTask straddle_with_stop(Ctx& ctx, double stop, double target) {
     if (legs.empty()) co_return;
     const auto pos = ctx.sell(legs, 1, "atm straddle");
     if (!pos) co_return;
-    co_await (ctx.pnl_pct_at_most(*pos, -stop) | ctx.pnl_pct_at_least(*pos, target)
+    co_await (pos->pnl_pct_at_most(-stop) | pos->pnl_pct_at_least(target)
               | ctx.at("15:15"));
-    ctx.close(*pos);
-    co_await (ctx.position_closed(*pos) | ctx.at("15:29"));
+    pos->close();
+    co_await (pos->closed() | ctx.at("15:29"));
 }
 
 struct Run {
@@ -168,8 +168,8 @@ TEST(short_positions_mark_at_the_ask_they_would_be_bought_back_at) {
             if (!pos) co_return;
             // Mid is unchanged at 100, so a mid-marked position shows no loss
             // and this never fires. Ask-marked, it is down 10%.
-            co_await ctx.pnl_pct_at_most(*pos, -0.05);
-            observed_pct = ctx.portfolio().at(*pos).pnl_pct(ctx.market());
+            co_await pos->pnl_pct_at_most(-0.05);
+            observed_pct = ctx.portfolio().at(pos->id()).pnl_pct(ctx.market());
         });
 
     CHECK_EQ(result.trade_log.size(), std::size_t{1});
@@ -213,7 +213,7 @@ TEST(pnl_is_zero_until_every_leg_has_filled) {
             if (!pos) co_return;
             // A stop on an unfilled position must not fire; treating unfilled as
             // flat would trigger it instantly.
-            co_await (ctx.pnl_pct_at_most(*pos, -0.01) | ctx.at("15:29"));
+            co_await (pos->pnl_pct_at_most(-0.01) | ctx.at("15:29"));
         });
 
     CHECK_EQ(result.trades, std::size_t{0});

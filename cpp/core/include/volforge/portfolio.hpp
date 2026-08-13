@@ -114,6 +114,11 @@ public:
 
     [[nodiscard]] Money pnl_of(std::size_t leg_index, const MarketView& market) const;
 
+    // Leg-level P&L as a fraction of that leg's own premium. Risk rules applied
+    // to a leg resolve against this; rules applied to the position resolve
+    // against pnl_pct above.
+    [[nodiscard]] double pnl_pct_of(std::size_t leg_index, const MarketView& market) const;
+
 private:
     PositionId       id_;
     std::string      label_;
@@ -133,6 +138,25 @@ struct PendingOrder {
     Timestamp    submitted_at{};
     Timestamp    eligible_at{};   // cannot fill before this
     bool         closing    = false;
+    bool         from_rule  = false;
+};
+
+// A standing exit condition attached to a position or one of its legs.
+//
+// Risk rules are *orders*, not signals. They are evaluated by the engine at base
+// resolution on every observation, regardless of what timeframe the strategy
+// reasons in and regardless of what the strategy currently happens to be
+// awaiting. A stop that is only checked when the strategy is looking at it is
+// not a stop.
+struct RiskRule {
+    enum class Kind : std::uint8_t { StopLossPct, TakeProfitPct, ExitAt };
+
+    Kind        kind = Kind::StopLossPct;
+    PositionId  position = -1;
+    std::optional<std::size_t> leg;   // unset = the whole position
+    double      threshold = 0.0;      // magnitude, as a fraction of premium
+    Timestamp   deadline{};           // for ExitAt
+    bool        fired = false;
 };
 
 struct TradeRecord {
@@ -144,6 +168,7 @@ struct TradeRecord {
     Qty          qty        = 0;
     Price        price;
     bool         illiquid   = false;
+    bool         from_rule  = false;   // closed by an attached risk rule
 };
 
 // ---------------------------------------------------------------------------
@@ -165,6 +190,20 @@ public:
 
     void submit_close(PositionId id, Timestamp now);
     void submit_close_leg(PositionId id, std::size_t leg_index, Timestamp now);
+
+    // --- attached risk rules ----------------------------------------------
+
+    void attach_stop_loss(PositionId id, std::optional<std::size_t> leg, double pct);
+    void attach_take_profit(PositionId id, std::optional<std::size_t> leg, double pct);
+    void attach_exit_at(PositionId id, std::optional<std::size_t> leg, Timestamp when);
+
+    // Evaluated once per observation, before strategy code runs. Any rule that
+    // fires submits a closing order through the ordinary path, so a stop is
+    // filled by exactly the same machinery — and under exactly the same timing
+    // guarantee — as a discretionary exit.
+    void process_risk_rules(const MarketView& market);
+
+    [[nodiscard]] std::size_t rules_fired() const { return rules_fired_; }
 
     // Fills whatever has become eligible. Called by the event loop once per
     // timestamp, before conditions are evaluated.
@@ -190,9 +229,12 @@ private:
     std::int64_t                     delay_;
     std::vector<Position>            positions_;
     std::vector<PendingOrder>        pending_;
+    std::vector<RiskRule>            rules_;
     std::vector<TradeRecord>         trades_;
     Money                            realized_{};
     std::size_t                      illiquid_fills_ = 0;
+    std::size_t                      rules_fired_    = 0;
+    bool                             closing_from_rule_ = false;
 };
 
 }  // namespace volforge

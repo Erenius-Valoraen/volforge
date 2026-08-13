@@ -62,6 +62,14 @@ Money Position::pnl_of(std::size_t i, const MarketView& market) const {
     return notional(mark, l.qty) - notional(l.entry, l.qty);
 }
 
+double Position::pnl_pct_of(std::size_t i, const MarketView& market) const {
+    const Leg& l = legs_.at(i);
+    if (!l.filled()) return 0.0;
+    const auto risk = std::abs(notional(l.entry, l.qty).minor);
+    if (risk == 0) return 0.0;
+    return static_cast<double>(pnl_of(i, market).minor) / static_cast<double>(risk);
+}
+
 Money Position::pnl(const MarketView& market) const {
     Money total{};
     for (std::size_t i = 0; i < legs_.size(); ++i) total = total + pnl_of(i, market);
@@ -85,7 +93,10 @@ Portfolio::Portfolio(std::shared_ptr<const FillModel> fills, std::int64_t execut
     if (delay_ < 0) throw std::invalid_argument("Portfolio: negative execution delay");
 }
 
-void Portfolio::submit(PendingOrder order) { pending_.push_back(order); }
+void Portfolio::submit(PendingOrder order) {
+    order.from_rule = closing_from_rule_;
+    pending_.push_back(order);
+}
 
 PositionId Portfolio::submit_open(std::string label,
                                   const std::vector<InstrumentId>& instruments,
@@ -175,10 +186,87 @@ void Portfolio::process_pending(const MarketView& market) {
         }
 
         trades_.push_back(TradeRecord{order.submitted_at, now, order.position, order.instrument,
-                                      order.side, order.qty, *price, illiquid});
+                                      order.side, order.qty, *price, illiquid,
+                                      order.from_rule});
     }
 
     pending_.swap(still_pending);
+}
+
+// ---------------------------------------------------------------------------
+// Risk rules
+// ---------------------------------------------------------------------------
+
+void Portfolio::attach_stop_loss(PositionId id, std::optional<std::size_t> leg, double pct) {
+    if (pct <= 0.0) throw std::invalid_argument("stop_loss: pct must be positive magnitude");
+    at(id);   // validates
+    rules_.push_back(RiskRule{RiskRule::Kind::StopLossPct, id, leg, pct, Timestamp{}, false});
+}
+
+void Portfolio::attach_take_profit(PositionId id, std::optional<std::size_t> leg, double pct) {
+    if (pct <= 0.0) throw std::invalid_argument("take_profit: pct must be positive magnitude");
+    at(id);
+    rules_.push_back(RiskRule{RiskRule::Kind::TakeProfitPct, id, leg, pct, Timestamp{}, false});
+}
+
+void Portfolio::attach_exit_at(PositionId id, std::optional<std::size_t> leg, Timestamp when) {
+    at(id);
+    rules_.push_back(RiskRule{RiskRule::Kind::ExitAt, id, leg, 0.0, when, false});
+}
+
+void Portfolio::process_risk_rules(const MarketView& market) {
+    if (rules_.empty()) return;
+
+    const Timestamp now = market.now();
+
+    for (RiskRule& rule : rules_) {
+        if (rule.fired) continue;
+
+        Position& pos = at(rule.position);
+        if (!pos.open()) { rule.fired = true; continue; }
+
+        // A rule on an unfilled position must not fire. Treating "not yet
+        // established" as flat would trigger every stop the instant it attached.
+        if (rule.leg) {
+            if (rule.leg >= pos.legs().size()) { rule.fired = true; continue; }
+            if (pos.legs()[*rule.leg].state != LegState::Open) continue;
+        } else if (!pos.established()) {
+            continue;
+        }
+
+        bool trigger = false;
+        switch (rule.kind) {
+            case RiskRule::Kind::StopLossPct: {
+                const double pnl = rule.leg ? pos.pnl_pct_of(*rule.leg, market)
+                                            : pos.pnl_pct(market);
+                trigger = pnl <= -rule.threshold;
+                break;
+            }
+            case RiskRule::Kind::TakeProfitPct: {
+                const double pnl = rule.leg ? pos.pnl_pct_of(*rule.leg, market)
+                                            : pos.pnl_pct(market);
+                trigger = pnl >= rule.threshold;
+                break;
+            }
+            case RiskRule::Kind::ExitAt:
+                trigger = now >= rule.deadline;
+                break;
+        }
+        if (!trigger) continue;
+
+        rule.fired = true;
+        ++rules_fired_;
+
+        // Routed through the ordinary order path: same fill model, same timing
+        // guarantee. A stop is an order, not a special case.
+        closing_from_rule_ = true;
+        if (rule.leg) {
+            submit_close_leg(rule.position, *rule.leg, now);
+        } else {
+            submit_close(rule.position, now);
+        }
+        closing_from_rule_ = false;
+    }
 }
 
 const Position& Portfolio::at(PositionId id) const {

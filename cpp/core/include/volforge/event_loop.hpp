@@ -54,6 +54,7 @@ struct RunResult {
     std::size_t resumes          = 0;   // times strategy code was entered
     std::size_t trades           = 0;
     std::size_t illiquid_fills   = 0;
+    std::size_t rules_fired      = 0;   // attached stops/targets that triggered
     std::size_t unfilled_orders  = 0;   // still pending at session end
     std::size_t open_positions   = 0;   // still live at session end
     bool        strategy_finished = false;

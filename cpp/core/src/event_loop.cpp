@@ -42,6 +42,11 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
 
         portfolio.process_pending(market);
 
+        // Attached risk rules are evaluated here — every observation, at the
+        // finest resolution the data provides, regardless of what timeframe the
+        // strategy reasons in or what it currently happens to be awaiting.
+        portfolio.process_risk_rules(market);
+
         const EvalCtx eval{&market, &portfolio, ev.ts};
         int guard = 0;
         while (!task.done() && task.pending().valid()) {
@@ -69,6 +74,7 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
     result.trades            = portfolio.trades().size();
     result.illiquid_fills    = portfolio.illiquid_fills();
     result.trade_log         = portfolio.trades();
+    result.rules_fired       = portfolio.rules_fired();
 
     for (std::size_t i = 0; i < portfolio.size(); ++i) {
         if (portfolio.at(static_cast<PositionId>(i)).open()) ++result.open_positions;

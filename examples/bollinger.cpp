@@ -51,10 +51,10 @@ StrategyTask breakout(Ctx& ctx, Confirm confirm) {
     const auto pos = ctx.buy({*call}, 1, "breakout call");
     if (!pos) co_return;
 
-    co_await (ctx.pnl_pct_at_least(*pos, 0.25) | ctx.pnl_pct_at_most(*pos, -0.20)
+    co_await (pos->pnl_pct_at_least(0.25) | pos->pnl_pct_at_most(-0.20)
               | ctx.after(600) | ctx.at("15:15"));
-    ctx.close(*pos);
-    co_await (ctx.position_closed(*pos) | ctx.at("15:29"));
+    pos->close();
+    co_await (pos->closed() | ctx.at("15:29"));
 }
 
 void report(const char* name, const SyntheticSession& synth, InstrumentRegistry& registry,

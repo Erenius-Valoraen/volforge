@@ -34,12 +34,12 @@ StrategyTask short_straddle(Ctx& ctx, double stop, double target) {
     const auto pos = ctx.sell(legs, 1, "atm straddle");
     if (!pos) co_return;
 
-    co_await (ctx.pnl_pct_at_most(*pos, -stop)
-              | ctx.pnl_pct_at_least(*pos, target)
+    co_await (pos->pnl_pct_at_most(-stop)
+              | pos->pnl_pct_at_least(target)
               | ctx.at("15:15"));
 
-    ctx.close(*pos);
-    co_await (ctx.position_closed(*pos) | ctx.at("15:29"));
+    pos->close();
+    co_await (pos->closed() | ctx.at("15:29"));
 }
 
 }  // namespace

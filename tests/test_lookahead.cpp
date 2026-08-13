@@ -349,9 +349,9 @@ TEST(detector_reports_clean_for_an_honest_strategy) {
         if (legs.empty()) co_return;
         const auto pos = ctx.sell(legs, 1, "straddle");
         if (!pos) co_return;
-        co_await (ctx.pnl_pct_at_most(*pos, -0.30) | ctx.at("15:15"));
-        ctx.close(*pos);
-        co_await (ctx.position_closed(*pos) | ctx.at("15:29"));
+        co_await (pos->pnl_pct_at_most(-0.30) | ctx.at("15:15"));
+        pos->close();
+        co_await (pos->closed() | ctx.at("15:29"));
     };
 
     const auto report = check_lookahead(*synth.data, synth.underlying, synth.spot, honest, {}, 50);
@@ -445,8 +445,8 @@ TEST(both_confirmation_policies_survive_the_detector) {
             const auto pos = ctx.buy({*call}, 1, "breakout");
             if (!pos) co_return;
             co_await (ctx.after(600) | ctx.at("15:15"));
-            ctx.close(*pos);
-            co_await (ctx.position_closed(*pos) | ctx.at("15:29"));
+            pos->close();
+            co_await (pos->closed() | ctx.at("15:29"));
         };
 
         const auto report = check_lookahead(*synth.data, synth.underlying, synth.spot, fn, {}, 50);
