@@ -6,7 +6,7 @@
 namespace volforge {
 
 BarSeries BarSeries::build(const QuoteColumns& cols, std::int64_t interval_nanos,
-                           Timestamp anchor, BarPrice source) {
+                           Timestamp anchor, BarPrice source, Timestamp valid_until) {
     if (interval_nanos <= 0) throw std::invalid_argument("BarSeries::build: interval must be > 0");
 
     BarSeries out;
@@ -14,6 +14,7 @@ BarSeries BarSeries::build(const QuoteColumns& cols, std::int64_t interval_nanos
     out.cols_     = cols;
     out.anchor_   = anchor;
     out.source_   = source;
+    out.valid_until_ = valid_until;
     if (cols.empty()) return out;
 
     auto price_of = [&](std::size_t i) {
@@ -66,6 +67,10 @@ BarSeries BarSeries::build(const QuoteColumns& cols, std::int64_t interval_nanos
 }
 
 std::size_t BarSeries::known_count(Timestamp now) const {
+    if (valid_until_.nanos != 0 && now > valid_until_) {
+        throw std::logic_error(
+            "bar series belongs to an earlier session; re-acquire it for the current one");
+    }
     // Bars are ordered by close_time, so this is the count of bars that have
     // finished. A bar closing exactly at `now` counts — it is complete.
     const auto it = std::upper_bound(

@@ -6,6 +6,17 @@
 namespace volforge {
 
 Money IndianFnOCosts::cost_of(const CostContext& ctx) const {
+    // Settlement is not a brokered order. Only the exercise levy applies, and it
+    // is charged on intrinsic value to the buyer of an in-the-money option; a
+    // writer being assigned pays none of it. Brokers differ on whether they bill
+    // a ticket for expiry, and the common case is that they do not.
+    if (ctx.exercise) {
+        const double intrinsic = ctx.intrinsic.to_double() * static_cast<double>(ctx.qty);
+        if (!(intrinsic > 0.0)) return Money{};
+        return Money{static_cast<std::int64_t>(
+            std::llround(intrinsic * rates_.stt_exercise_pct * 100.0))};
+    }
+
     const double premium = ctx.price.to_double() * static_cast<double>(ctx.qty);
     const double brokerage = static_cast<double>(rates_.brokerage_per_order.minor) / 100.0;
 
@@ -23,10 +34,7 @@ Money IndianFnOCosts::cost_of(const CostContext& ctx) const {
     // Statutory levies, which GST does not apply to. STT lands on the seller of
     // premium; stamp duty on the buyer.
     double statutory = 0.0;
-    if (ctx.exercise) {
-        statutory = ctx.intrinsic.to_double() * static_cast<double>(ctx.qty) *
-                    rates_.stt_exercise_pct;
-    } else if (ctx.side == Side::Sell) {
+    if (ctx.side == Side::Sell) {
         statutory = premium * rates_.stt_sell_pct;
     } else {
         statutory = premium * rates_.stamp_buy_pct;

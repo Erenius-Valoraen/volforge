@@ -10,11 +10,14 @@ A backtesting engine for options, built for people who need to trust the result.
 > recovered from the chain by put-call parity — so they need no index feed at all.
 >
 > Margin is modelled with a SPAN-style 16-scenario revaluation plus exposure, so defined-risk
-> spreads margin far below their legs. The storage layer and the Python layer are not written
-> yet, so this is not usable for real backtesting.
+> spreads margin far below their legs.
+>
+> Backtests run across many sessions: positions carry overnight with their marks and risk
+> rules intact, and options that reach expiry cash-settle at intrinsic. The storage layer and
+> the Python layer are not written yet, so this is not usable for real backtesting.
 >
 > Working examples: [short_straddle.cpp](examples/short_straddle.cpp),
-> [bollinger.cpp](examples/bollinger.cpp).
+> [bollinger.cpp](examples/bollinger.cpp), [positional.cpp](examples/positional.cpp).
 >
 > The storage layer is deliberately unspecified pending a vendor format decision; the engine
 > is written against the abstraction, not the format.
@@ -138,6 +141,7 @@ Documentation:
 
 - [docs/strategy-api.md](docs/strategy-api.md) — the full authoring model
 - [docs/series-and-timeframes.md](docs/series-and-timeframes.md) — history access, resampling, multi-timeframe
+- [docs/sessions-and-expiry.md](docs/sessions-and-expiry.md) — multi-session runs, overnight carry, and what happens at expiry
 - [docs/costs-and-margin.md](docs/costs-and-margin.md) — verified charge rates, SPAN methodology, and where both are known to be wrong
 - [docs/design.md](docs/design.md) — architecture rationale and measurements
 - [docs/execution-semantics.md](docs/execution-semantics.md) — signal time vs fill time, confirmation policy, and where look-ahead really comes from

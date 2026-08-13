@@ -7,6 +7,7 @@ add_executable(volforge_tests
     test_greeks.cpp
     test_accounting.cpp
     test_margin.cpp
+    test_backtest.cpp
 )
 
 target_link_libraries(volforge_tests PRIVATE volforge::core)

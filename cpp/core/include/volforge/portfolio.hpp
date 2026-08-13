@@ -83,6 +83,16 @@ struct Leg {
     Price     exit;
     Timestamp exit_ts{};
 
+    // Last price this leg could be marked at, carried forward.
+    //
+    // Overnight this is the only thing standing between a held position and a
+    // P&L of zero: on the next session's first observations the instrument has
+    // not printed yet, so quoting it returns nothing. Without a carried mark the
+    // position would silently value at nil until its first trade of the day.
+    Price     last_mark;
+    Timestamp last_mark_ts{};
+    bool      settled = false;   // closed by expiry rather than by an order
+
     [[nodiscard]] bool is_short() const { return qty < 0; }
     [[nodiscard]] bool filled() const {
         return state == LegState::Open || state == LegState::PendingClose ||
@@ -124,6 +134,10 @@ public:
     [[nodiscard]] double pnl_pct(const MarketView& market) const;
 
     [[nodiscard]] Money pnl_of(std::size_t leg_index, const MarketView& market) const;
+
+    // The price a leg would close at right now, or a negative sentinel when no
+    // valuation is available. Falls back to the carried mark, then to entry.
+    [[nodiscard]] static Price mark_for(const Leg& leg, const MarketView& market);
 
     // Leg-level P&L as a fraction of that leg's own premium. Risk rules applied
     // to a leg resolve against this; rules applied to the position resolve
@@ -182,6 +196,7 @@ struct TradeRecord {
     bool         illiquid   = false;   // filled across a suspiciously wide spread
     bool         from_rule  = false;   // closed by an attached risk rule
     bool         oversized  = false;   // larger than the size displayed at the touch
+    bool         settled    = false;   // cash settlement at expiry, not an order
 };
 
 // ---------------------------------------------------------------------------
@@ -201,6 +216,25 @@ public:
     // PendingOpen until process_pending fills them at a later timestamp.
     PositionId submit_open(std::string label, const std::vector<InstrumentId>& instruments,
                            Side side, Qty qty_per_leg, Timestamp now);
+
+    // Records a fresh mark for every open leg that is quoting. Called once per
+    // observation by the loop, so a position always has a valuation even when
+    // its instrument has gone quiet or a new session has not reached it yet.
+    void refresh_marks(const MarketView& market);
+
+    // Cash-settles every open leg expiring on `expiry` against the settlement
+    // level of the underlying. Legs finish Closed at their intrinsic value.
+    //
+    // This is what happens when a strategy does nothing, because it is what
+    // happens in reality. STT on exercise falls on the buyer and is charged on
+    // intrinsic value, not premium.
+    std::size_t settle_expiry(const MarketView& market, Date expiry, double settlement_level,
+                              Timestamp when);
+
+    // Cancels orders that have not filled by the close. Exchange orders are day
+    // orders; carrying them overnight would fill against a price the strategy
+    // never saw.
+    std::size_t cancel_working_orders();
 
     void submit_close(PositionId id, Timestamp now);
     void submit_close_leg(PositionId id, std::size_t leg_index, Timestamp now);
@@ -239,6 +273,7 @@ public:
     [[nodiscard]] std::size_t illiquid_fills() const { return illiquid_fills_; }
     [[nodiscard]] std::size_t oversized_fills() const { return oversized_fills_; }
     [[nodiscard]] std::size_t cancelled_orders() const { return cancelled_orders_; }
+    [[nodiscard]] std::size_t settled_legs() const { return settled_legs_; }
     [[nodiscard]] std::int64_t execution_delay_nanos() const { return delay_; }
 
 private:
@@ -256,6 +291,7 @@ private:
     std::size_t                      illiquid_fills_  = 0;
     std::size_t                      oversized_fills_ = 0;
     std::size_t                      cancelled_orders_ = 0;
+    std::size_t                      settled_legs_    = 0;
     std::size_t                      rules_fired_    = 0;
     bool                             closing_from_rule_ = false;
 };

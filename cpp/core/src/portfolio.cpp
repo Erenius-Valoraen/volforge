@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -24,8 +25,17 @@ std::optional<Price> CrossSpreadFill::fill(const Quote& q, Side side, Qty) const
 // ---------------------------------------------------------------------------
 
 bool Position::established() const {
-    return !legs_.empty() &&
-           std::all_of(legs_.begin(), legs_.end(), [](const Leg& l) { return l.filled(); });
+    // Cancelled legs are not part of the position — an order that never filled
+    // is not a holding. Requiring them to be "filled" would leave a position
+    // with one cancelled leg permanently unestablished, which in turn would
+    // disable every percentage stop on it while its surviving leg ran naked.
+    bool any = false;
+    for (const Leg& l : legs_) {
+        if (l.cancelled()) continue;
+        if (!l.filled()) return false;   // still working; not established yet
+        any = true;
+    }
+    return any;
 }
 
 bool Position::open() const {
@@ -44,6 +54,33 @@ Money Position::entry_notional() const {
     return m;
 }
 
+// The price this leg would close at, or a negative sentinel when nothing is
+// available. Never mid: a short marks at the ask it is bought back at, a long at
+// the bid it is sold into.
+Price Position::mark_for(const Leg& l, const MarketView& market) {
+    const auto q = market.quote(l.instrument);
+
+    if (q) {
+        const Price side = l.qty < 0 ? q->ask : q->bid;
+        if (side.minor > 0) return side;
+
+        if (l.qty > 0) {
+            // A long with no bid is worthless, and that is a real mark. Falling
+            // back here would delete a total loss.
+            return Price::from_minor(0);
+        }
+        // A short with no offer cannot be bought back at zero; claiming so would
+        // book the whole premium as profit.
+        if (q->last.minor > 0) return q->last;
+    }
+
+    // Nothing quoting: a quiet instrument, or a session that has not reached it
+    // yet. Carry the last mark rather than valuing the position at nothing.
+    if (l.last_mark_ts.nanos != 0 && l.last_mark.minor >= 0) return l.last_mark;
+    if (l.filled()) return l.entry;
+    return Price::from_minor(-1);
+}
+
 Money Position::pnl_of(std::size_t i, const MarketView& market) const {
     const Leg& l = legs_.at(i);
     if (!l.filled()) return Money{};
@@ -53,23 +90,8 @@ Money Position::pnl_of(std::size_t i, const MarketView& market) const {
         return notional(l.exit, l.qty) - notional(l.entry, l.qty);
     }
 
-    const auto q = market.quote(l.instrument);
-    if (!q) return Money{};   // never printed; impossible for a filled leg
-
-    // Mark at the side that would close this leg, not at mid.
-    Price mark = l.qty < 0 ? q->ask : q->bid;
-
-    if (mark.minor <= 0) {
-        if (l.qty < 0) {
-            // Short with no offer. Buying back at zero would book a fictitious
-            // full profit, so fall back to the last trade and, failing that,
-            // refuse to claim any gain at all.
-            mark = q->last.minor > 0 ? q->last : l.entry;
-        }
-        // Long with a zero bid is a real mark: the option is worthless and the
-        // loss is total. Reporting zero here would delete a 100% loss and stop
-        // any percentage stop from ever firing.
-    }
+    Price mark = mark_for(l, market);
+    if (mark.minor < 0) return Money{};   // no valuation available at all
     return notional(mark, l.qty) - notional(l.entry, l.qty);
 }
 
@@ -234,6 +256,133 @@ void Portfolio::process_pending(const MarketView& market) {
     }
 
     pending_.swap(still_pending);
+}
+
+// ---------------------------------------------------------------------------
+// Marks, settlement and end of day
+// ---------------------------------------------------------------------------
+
+void Portfolio::refresh_marks(const MarketView& market) {
+    const Timestamp now = market.now();
+    for (Position& pos : positions_) {
+        for (Leg& leg : pos.legs()) {
+            if (!leg.live()) continue;
+            const auto q = market.quote(leg.instrument);
+            if (!q) continue;
+
+            const Price side = leg.qty < 0 ? q->ask : q->bid;
+            if (side.minor > 0) {
+                leg.last_mark = side;
+            } else if (leg.qty > 0) {
+                leg.last_mark = Price::from_minor(0);   // a long with no bid is worthless
+            } else if (q->last.minor > 0) {
+                leg.last_mark = q->last;                // short with no offer
+            } else {
+                continue;                               // nothing usable; keep the old mark
+            }
+            leg.last_mark_ts = now;
+        }
+    }
+}
+
+std::size_t Portfolio::settle_expiry(const MarketView& market, Date expiry,
+                                     double settlement_level, Timestamp when) {
+    std::size_t settled = 0;
+
+    for (Position& pos : positions_) {
+        for (std::size_t i = 0; i < pos.legs().size(); ++i) {
+            Leg& leg = pos.legs()[i];
+            if (!leg.live()) continue;
+
+            const InstrumentSpec& spec = market.registry().spec(leg.instrument);
+            if (!spec.is_option() || spec.expiry != expiry) continue;
+
+            const double strike = spec.strike.to_double();
+            const double value  = spec.right == Right::Call
+                                      ? std::max(0.0, settlement_level - strike)
+                                      : std::max(0.0, strike - settlement_level);
+            const Price settle_px = Price::from_double(value);
+
+            leg.exit     = settle_px;
+            leg.exit_ts  = when;
+            leg.state    = LegState::Closed;
+            leg.settled  = true;
+            realized_ = realized_ + (notional(settle_px, leg.qty) - notional(leg.entry, leg.qty));
+
+            // STT on exercise falls on the buyer of an in-the-money option and is
+            // charged on intrinsic value. A writer being assigned pays none of it.
+            Money cost{};
+            if (leg.qty > 0 && value > 0.0) {
+                const CostContext cc{&spec, settle_px, leg.qty, Side::Sell, true, settle_px};
+                cost = costs_->cost_of(cc);
+                total_costs_ = total_costs_ + cost;
+            }
+
+            TradeRecord rec;
+            rec.signal_ts  = when;
+            rec.fill_ts    = when;
+            rec.position   = pos.id();
+            rec.instrument = leg.instrument;
+            rec.side       = leg.closing_side();
+            rec.qty        = static_cast<Qty>(std::abs(leg.qty));
+            rec.price      = settle_px;
+            rec.cost       = cost;
+            rec.settled    = true;
+            trades_.push_back(rec);
+
+            ++settled;
+            ++settled_legs_;
+        }
+    }
+
+    // Orders working against an instrument that has just settled can never fill.
+    std::vector<PendingOrder> keep;
+    keep.reserve(pending_.size());
+    for (const PendingOrder& o : pending_) {
+        const InstrumentSpec& spec = market.registry().spec(o.instrument);
+        if (spec.is_option() && spec.expiry == expiry) {
+            Leg& leg = positions_[static_cast<std::size_t>(o.position)].legs()[o.leg_index];
+            if (!o.closing && leg.state == LegState::PendingOpen) leg.state = LegState::Cancelled;
+            ++cancelled_orders_;
+            continue;
+        }
+        keep.push_back(o);
+    }
+    pending_.swap(keep);
+
+    return settled;
+}
+
+std::size_t Portfolio::cancel_working_orders() {
+    const std::size_t n = pending_.size();
+    std::set<PositionId> exits_abandoned;
+
+    for (const PendingOrder& o : pending_) {
+        Leg& leg = positions_[static_cast<std::size_t>(o.position)].legs()[o.leg_index];
+        if (o.closing) {
+            // The exit did not get done. The leg is still held, so it goes back
+            // to Open rather than lingering as PendingClose forever.
+            if (leg.state == LegState::PendingClose) {
+                leg.state = LegState::Open;
+                exits_abandoned.insert(o.position);
+            }
+        } else if (leg.state == LegState::PendingOpen) {
+            leg.state = LegState::Cancelled;
+        }
+    }
+    pending_.clear();
+    cancelled_orders_ += n;
+
+    // Re-arm the rules whose exits were abandoned. A stop that fired and then
+    // failed to fill has not done its job; leaving it spent would carry the
+    // position overnight believing it was protected.
+    for (RiskRule& rule : rules_) {
+        if (!rule.fired) continue;
+        if (exits_abandoned.count(rule.position) == 0) continue;
+        if (!at(rule.position).open()) continue;
+        rule.fired = false;
+    }
+    return n;
 }
 
 // ---------------------------------------------------------------------------

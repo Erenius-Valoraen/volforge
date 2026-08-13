@@ -15,6 +15,7 @@ add_library(volforge_core
     src/greeks.cpp
     src/costs.cpp
     src/margin.cpp
+    src/backtest.cpp
 )
 
 target_include_directories(volforge_core PUBLIC

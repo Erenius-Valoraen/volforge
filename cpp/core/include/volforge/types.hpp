@@ -66,6 +66,34 @@ constexpr std::int64_t days_from_civil(int y, unsigned m, unsigned d) {
     return static_cast<std::int64_t>(era) * 146097 + static_cast<std::int64_t>(doe) - 719468;
 }
 
+// Inverse of days_from_civil.
+constexpr Date date_from_days(std::int64_t z) {
+    z += 719468;
+    const std::int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const auto doe = static_cast<std::uint64_t>(z - era * 146097);
+    const std::uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const std::int64_t y = static_cast<std::int64_t>(yoe) + era * 400;
+    const std::uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const std::uint64_t mp = (5 * doy + 2) / 153;
+    const std::uint64_t d = doy - (153 * mp + 2) / 5 + 1;
+    const std::uint64_t m = mp < 10 ? mp + 3 : mp - 9;
+    const std::int64_t year = y + (m <= 2 ? 1 : 0);
+    return Date{static_cast<std::int32_t>(year * 10000 + static_cast<std::int64_t>(m) * 100 +
+                                          static_cast<std::int64_t>(d))};
+}
+
+// Day of week, 0 = Sunday. 1970-01-01 was a Thursday.
+constexpr int weekday_of(Date d) {
+    const std::int64_t days = days_from_civil(d.year(), static_cast<unsigned>(d.month()),
+                                              static_cast<unsigned>(d.day()));
+    return static_cast<int>(((days + 4) % 7 + 7) % 7);
+}
+
+constexpr Date add_days(Date d, int n) {
+    return date_from_days(days_from_civil(d.year(), static_cast<unsigned>(d.month()),
+                                          static_cast<unsigned>(d.day())) + n);
+}
+
 // NSE trades at UTC+5:30. Sessions are described in local wall-clock time
 // throughout, so adapters must state the offset rather than assume one.
 constexpr int kISTOffsetSeconds = 5 * 3600 + 30 * 60;

@@ -181,7 +181,10 @@ public:
     // Combined-position rules. `pct` is a positive magnitude in both cases.
     void stop_loss(double pct) const;
     void take_profit(double pct) const;
+    // Today's `hhmm`. For a position carried across sessions this is almost
+    // never what is meant — use exit_at_on with the intended date.
     void exit_at(std::string_view hhmm) const;
+    void exit_at_on(Date date, std::string_view hhmm) const;
 
     void close() const;
 
@@ -203,6 +206,16 @@ public:
     Ctx(const SessionData& session, const MarketView& market, Portfolio& portfolio,
         UnderlyingId underlying, InstrumentId spot, Date date, int utc_offset_seconds,
         int session_open_sec, double rate, std::shared_ptr<const MarginModel> margin);
+
+    // Points the context at a new trading session. The strategy coroutine and
+    // the portfolio outlive a session; the data does not. Cached bar series are
+    // dropped, since they describe the session that just ended.
+    void bind_session(const SessionData& session, const MarketView& market, Date date);
+
+    // The sessions this run will cover, ascending. Used to resolve a time of day
+    // that has already passed today onto the next trading day rather than onto a
+    // calendar day that may not trade.
+    void set_calendar(const std::vector<Date>* calendar) { calendar_ = calendar; }
 
     [[nodiscard]] Timestamp now() const { return market_->now(); }
     [[nodiscard]] const MarketView& market() const { return *market_; }
@@ -259,7 +272,18 @@ public:
 
     // --- conditions -------------------------------------------------------
 
+    // The next occurrence of this time of day. If it has already passed today,
+    // it resolves to the same time on the next *trading* session, so a strategy
+    // written as a daily loop repeats without knowing the calendar.
     [[nodiscard]] Cond at(std::string_view hhmm) const;
+
+    // A specific wall-clock time on a specific date. For scheduling against an
+    // expiry, where "next occurrence" is not what is meant.
+    [[nodiscard]] Cond at_on(Date date, std::string_view hhmm) const;
+
+    // The nearest expiry at least `min_days_ahead` days out. Zero includes an
+    // expiry falling today, which is rarely what a roll wants.
+    [[nodiscard]] std::optional<Date> next_expiry(int min_days_ahead = 0) const;
 
     // A relative deadline, measured from now.
     [[nodiscard]] Cond after(int seconds) const;
@@ -284,6 +308,8 @@ private:
     Timestamp                 anchor_;
     double                    rate_;
     std::shared_ptr<const MarginModel> margin_;
+    const std::vector<Date>*  calendar_ = nullptr;
+    int                       session_open_sec_;
 
     // Keyed by (instrument, interval, price source).
     mutable std::map<std::tuple<std::int32_t, int, int>,

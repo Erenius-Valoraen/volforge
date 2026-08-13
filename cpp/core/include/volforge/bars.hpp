@@ -49,8 +49,12 @@ public:
     // Resamples one instrument. `anchor` is the session open, so boundaries
     // follow the trading session rather than wall-clock arithmetic: with a 09:15
     // open, five-minute bars run 09:15-09:20, 09:20-09:25 and so on.
+    // `valid_until` bounds the session this series describes. Querying it past
+    // that point throws instead of answering, because a series fetched on one
+    // day would otherwise keep returning that day's bars on the next — silently,
+    // and looking entirely reasonable. Zero disables the check.
     static BarSeries build(const QuoteColumns& cols, std::int64_t interval_nanos,
-                           Timestamp anchor, BarPrice source);
+                           Timestamp anchor, BarPrice source, Timestamp valid_until = {});
 
     [[nodiscard]] const std::vector<Bar>& all() const { return bars_; }
     [[nodiscard]] std::int64_t interval_nanos() const { return interval_; }
@@ -78,6 +82,7 @@ public:
 private:
     std::vector<Bar> bars_;
     QuoteColumns     cols_;      // retained so `forming` can aggregate as-of
+    Timestamp        valid_until_{};
     Timestamp        anchor_{};
     BarPrice         source_ = BarPrice::Last;
     std::int64_t     interval_ = 0;

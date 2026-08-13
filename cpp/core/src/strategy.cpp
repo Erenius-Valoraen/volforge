@@ -27,13 +27,25 @@ ChainView::ChainView(const Ctx& ctx, Date expiry) : ctx_(&ctx), expiry_(expiry) 
 }
 
 std::optional<Price> ChainView::atm_strike() const {
-    const auto spot = ctx_->spot_price();
-    if (!spot || strikes_.empty()) return std::nullopt;
+    if (strikes_.empty()) return std::nullopt;
+
+    // The money is wherever the underlying is. Failing an index feed, the chain
+    // locates itself: put-call parity recovers the forward from these very
+    // quotes, so strike selection works on an options-only feed exactly as
+    // Greeks do.
+    Price reference;
+    if (const auto spot = ctx_->spot_price()) {
+        reference = *spot;
+    } else if (const auto fwd = ctx_->forward(expiry_)) {
+        reference = Price::from_double(*fwd);
+    } else {
+        return std::nullopt;
+    }
 
     auto best = strikes_.begin();
-    auto best_gap = std::abs(best->minor - spot->minor);
+    auto best_gap = std::abs(best->minor - reference.minor);
     for (auto it = strikes_.begin(); it != strikes_.end(); ++it) {
-        const auto gap = std::abs(it->minor - spot->minor);
+        const auto gap = std::abs(it->minor - reference.minor);
         if (gap < best_gap) { best = it; best_gap = gap; }
     }
     return *best;
@@ -109,7 +121,18 @@ Ctx::Ctx(const SessionData& session, const MarketView& market, Portfolio& portfo
     : session_(&session), market_(&market), portfolio_(&portfolio),
       underlying_(underlying), spot_(spot), date_(date), utc_offset_(utc_offset_seconds),
       anchor_(timestamp_of(date, session_open_sec, utc_offset_seconds)), rate_(rate),
-      margin_(margin ? std::move(margin) : default_margin_model()) {}
+      margin_(margin ? std::move(margin) : default_margin_model()),
+      session_open_sec_(session_open_sec) {}
+
+void Ctx::bind_session(const SessionData& session, const MarketView& market, Date date) {
+    session_ = &session;
+    market_  = &market;
+    date_    = date;
+    anchor_  = timestamp_of(date, session_open_sec_, utc_offset_);
+    // Cached series describe the session that just ended. Keeping them would let
+    // a strategy read yesterday's bars today.
+    bar_cache_.clear();
+}
 
 std::optional<Price> Ctx::spot_price() const {
     const auto q = market_->quote(spot_);
@@ -221,9 +244,12 @@ std::shared_ptr<const BarSeries> Ctx::bars(InstrumentId id, int interval_seconds
     const auto key = std::make_tuple(index_of(id), interval_seconds, static_cast<int>(source));
     if (const auto it = bar_cache_.find(key); it != bar_cache_.end()) return it->second;
 
+    // Valid only for the session it was built from; a query past the end of that
+    // day throws rather than quietly serving stale bars.
+    const Timestamp valid_until{anchor_.nanos + 24LL * 3600 * 1'000'000'000};
     auto series = std::make_shared<const BarSeries>(BarSeries::build(
         session_->quotes(id), static_cast<std::int64_t>(interval_seconds) * 1'000'000'000,
-        anchor_, source));
+        anchor_, source, valid_until));
     bar_cache_.emplace(key, series);
     return series;
 }
@@ -281,10 +307,11 @@ void PositionRef::stop_loss(double pct) const {
 void PositionRef::take_profit(double pct) const {
     ctx_->portfolio().attach_take_profit(id_, std::nullopt, pct);
 }
-void PositionRef::exit_at(std::string_view hhmm) const {
+void PositionRef::exit_at(std::string_view hhmm) const { exit_at_on(ctx_->date(), hhmm); }
+
+void PositionRef::exit_at_on(Date date, std::string_view hhmm) const {
     ctx_->portfolio().attach_exit_at(
-        id_, std::nullopt,
-        timestamp_of(ctx_->date(), parse_time_of_day(hhmm), kISTOffsetSeconds));
+        id_, std::nullopt, timestamp_of(date, parse_time_of_day(hhmm), kISTOffsetSeconds));
 }
 void PositionRef::close() const { ctx_->close(id_); }
 
@@ -303,7 +330,34 @@ void Ctx::close_leg(PositionId id, std::size_t leg_index) {
 }
 
 Cond Ctx::at(std::string_view hhmm) const {
-    return at_or_after(timestamp_of(date_, parse_time_of_day(hhmm), utc_offset_));
+    const int sod = parse_time_of_day(hhmm);
+    const Timestamp today = timestamp_of(date_, sod, utc_offset_);
+
+    if (now() < today) return at_or_after(today);
+
+    // Already past for today. Resolve onto the next *trading* session rather
+    // than the next calendar day, which may be a weekend or a holiday.
+    if (calendar_ != nullptr) {
+        for (const Date d : *calendar_) {
+            if (d > date_) return at_or_after(timestamp_of(d, sod, utc_offset_));
+        }
+        // No session left. A condition that can never hold is the honest answer;
+        // returning a past timestamp would fire immediately and spin.
+        return Cond([](const EvalCtx&) { return false; });
+    }
+    return at_or_after(today);
+}
+
+Cond Ctx::at_on(Date date, std::string_view hhmm) const {
+    return at_or_after(timestamp_of(date, parse_time_of_day(hhmm), utc_offset_));
+}
+
+std::optional<Date> Ctx::next_expiry(int min_days_ahead) const {
+    const Date earliest = add_days(date_, min_days_ahead);
+    for (const Date d : expiries()) {
+        if (d >= earliest) return d;
+    }
+    return std::nullopt;
 }
 
 Cond Ctx::after(int seconds) const {

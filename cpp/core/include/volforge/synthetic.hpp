@@ -50,4 +50,43 @@ struct SyntheticSession {
 SyntheticSession make_synthetic_session(InstrumentRegistry& registry,
                                         const SyntheticConfig& cfg = {});
 
+// ---------------------------------------------------------------------------
+// Multi-session
+// ---------------------------------------------------------------------------
+
+struct SyntheticSeriesConfig {
+    Date start{20250630};        // first session; weekends are skipped
+    int  sessions = 10;
+    int  expiry_weekday = 4;     // Thursday, NSE's weekly index expiry
+    int  expiries_ahead = 2;     // how many weekly expiries are listed at once
+
+    Price spot_open   = Price::from_double(25000.0);
+    Price strike_step = Price::from_double(50.0);
+    int   strikes_each_side = 10;
+
+    int session_open_sec  = 9 * 3600 + 15 * 60;
+    int session_close_sec = 15 * 3600 + 30 * 60;
+    int step_seconds      = 5;   // coarser than the single-session generator, for speed
+
+    Qty lot_size = 75;
+    std::uint64_t seed = 7;
+};
+
+struct SyntheticSeries {
+    std::shared_ptr<MemoryDataSource> source;
+    UnderlyingId                      underlying{};
+    InstrumentId                      spot = InstrumentId::Invalid;
+    std::vector<Date>                 dates;
+    std::vector<Date>                 expiries;
+};
+
+// Generates consecutive trading sessions with rolling weekly expiries, so that
+// positions genuinely survive overnight and options genuinely reach settlement.
+//
+// The spot walks continuously across sessions and gaps overnight, because a
+// position held through a gap is exactly what a positional backtest has to get
+// right. `registry` must outlive the returned series.
+SyntheticSeries make_synthetic_series(InstrumentRegistry& registry,
+                                      const SyntheticSeriesConfig& cfg = {});
+
 }  // namespace volforge
