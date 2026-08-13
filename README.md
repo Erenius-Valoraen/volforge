@@ -2,8 +2,14 @@
 
 A backtesting engine for options, built for people who need to trust the result.
 
-> **Status: design phase.** The architecture below is settled; implementation has not started.
-> Nothing here is usable yet.
+> **Status: early.** The architecture below is settled and the data abstraction layer is in
+> place — instrument registry, quote columns, session and event iteration, the time-bounded
+> market view, and a synthetic data generator to develop against. The event loop, indicators,
+> fills, margin and the Python layer are not written yet, and nothing here is usable for
+> backtesting.
+>
+> The storage layer is deliberately unspecified pending a vendor format decision; the engine
+> is written against the abstraction, not the format.
 
 ## Why another backtester
 

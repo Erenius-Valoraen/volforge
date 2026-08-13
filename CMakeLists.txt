@@ -23,6 +23,13 @@ else()
 endif()
 
 # Layers are added here as they land. See docs/design.md for the architecture.
-#   cpp/core  — event loop, portfolio, fills, margin, Greeks
+#   cpp/core  — data interface, event loop, portfolio, fills, margin, Greeks
 #   cpp/ta    — streaming indicators
 #   python    — strategy API bindings
+
+add_subdirectory(cpp/core)
+
+if(VOLFORGE_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
