@@ -13,6 +13,8 @@ add_library(volforge_core
     src/indicators.cpp
     src/lookahead.cpp
     src/greeks.cpp
+    src/costs.cpp
+    src/margin.cpp
 )
 
 target_include_directories(volforge_core PUBLIC

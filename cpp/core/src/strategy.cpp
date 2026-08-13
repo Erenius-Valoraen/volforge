@@ -105,10 +105,11 @@ std::vector<InstrumentId> ChainView::strangle_by_delta(double target) const {
 
 Ctx::Ctx(const SessionData& session, const MarketView& market, Portfolio& portfolio,
          UnderlyingId underlying, InstrumentId spot, Date date, int utc_offset_seconds,
-         int session_open_sec, double rate)
+         int session_open_sec, double rate, std::shared_ptr<const MarginModel> margin)
     : session_(&session), market_(&market), portfolio_(&portfolio),
       underlying_(underlying), spot_(spot), date_(date), utc_offset_(utc_offset_seconds),
-      anchor_(timestamp_of(date, session_open_sec, utc_offset_seconds)), rate_(rate) {}
+      anchor_(timestamp_of(date, session_open_sec, utc_offset_seconds)), rate_(rate),
+      margin_(margin ? std::move(margin) : default_margin_model()) {}
 
 std::optional<Price> Ctx::spot_price() const {
     const auto q = market_->quote(spot_);
@@ -140,6 +141,46 @@ std::optional<double> Ctx::forward(Date expiry) const {
                                     pq->mid().to_double()});
     }
     return forward_from_parity(pairs.data(), pairs.size(), t, rate_);
+}
+
+MarginResult Ctx::margin() const {
+    // Grouped by expiry: SPAN nets risk within an underlying and expiry, and
+    // margining a calendar as two unrelated books would overstate the
+    // requirement badly.
+    std::map<std::int32_t, std::vector<MarginLeg>> by_expiry;
+
+    for (std::size_t i = 0; i < portfolio_->size(); ++i) {
+        const Position& pos = portfolio_->at(static_cast<PositionId>(i));
+        for (const Leg& leg : pos.legs()) {
+            if (!leg.live()) continue;
+            const InstrumentSpec& spec = registry().spec(leg.instrument);
+            if (!spec.is_option()) continue;
+
+            const auto g = greeks(leg.instrument);
+            if (!g) continue;   // unsolvable iv; cannot scenario-price this leg
+
+            by_expiry[spec.expiry.yyyymmdd].push_back(
+                MarginLeg{spec.right, spec.strike.to_double(), leg.qty, g->iv});
+        }
+    }
+
+    MarginResult total;
+    for (const auto& [yyyymmdd, legs] : by_expiry) {
+        const Date expiry{yyyymmdd};
+        const auto fwd = forward(expiry);
+        if (!fwd) continue;
+        const double t = time_to_expiry(now(), expiry, utc_offset_);
+        if (!(t > 0.0)) continue;
+
+        const MarginResult r = margin_->requirement(legs, *fwd, t, rate_);
+        total.span     = total.span + r.span;
+        total.exposure = total.exposure + r.exposure;
+        total.total    = total.total + r.total;
+        total.scanning_risk += r.scanning_risk;
+        total.net_option_value += r.net_option_value;
+        total.floor_applied = total.floor_applied || r.floor_applied;
+    }
+    return total;
 }
 
 std::optional<GreekSet> Ctx::greeks(InstrumentId id) const {

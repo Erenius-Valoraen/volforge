@@ -9,6 +9,7 @@
 #include "volforge/condition.hpp"
 #include "volforge/greeks.hpp"
 #include "volforge/indicators.hpp"
+#include "volforge/margin.hpp"
 #include "volforge/portfolio.hpp"
 
 #include <coroutine>
@@ -201,7 +202,7 @@ class Ctx {
 public:
     Ctx(const SessionData& session, const MarketView& market, Portfolio& portfolio,
         UnderlyingId underlying, InstrumentId spot, Date date, int utc_offset_seconds,
-        int session_open_sec, double rate);
+        int session_open_sec, double rate, std::shared_ptr<const MarginModel> margin);
 
     [[nodiscard]] Timestamp now() const { return market_->now(); }
     [[nodiscard]] const MarketView& market() const { return *market_; }
@@ -226,6 +227,11 @@ public:
     // Implied volatility and Greeks for one option, from its current mid.
     // nullopt when the quote is one-sided, or when no volatility reproduces it.
     [[nodiscard]] std::optional<GreekSet> greeks(InstrumentId id) const;
+
+    // Margin required right now for every open position, grouped by expiry so a
+    // calendar is not margined as if its legs were unrelated. Long-only books
+    // require nothing beyond the premium already paid.
+    [[nodiscard]] MarginResult margin() const;
 
     [[nodiscard]] ChainView chain() const;
     [[nodiscard]] ChainView chain(Date expiry) const;
@@ -277,6 +283,7 @@ private:
     int                       utc_offset_;
     Timestamp                 anchor_;
     double                    rate_;
+    std::shared_ptr<const MarginModel> margin_;
 
     // Keyed by (instrument, interval, price source).
     mutable std::map<std::tuple<std::int32_t, int, int>,

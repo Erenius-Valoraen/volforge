@@ -1,5 +1,7 @@
 #include "volforge/event_loop.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace volforge {
@@ -14,8 +16,12 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
     MarketView  market(session, clock);
     Portfolio   portfolio(fills, config.execution_delay_nanos, config.costs);
 
+    const std::int64_t margin_interval =
+        static_cast<std::int64_t>(std::max(1, config.margin_sample_seconds)) * 1'000'000'000;
+    Timestamp next_margin{std::numeric_limits<std::int64_t>::min()};
+
     Ctx ctx(session, market, portfolio, underlying, spot, session.date(), kISTOffsetSeconds,
-            config.session_open_sec, config.rate);
+            config.session_open_sec, config.rate, config.margin);
 
     StrategyTask task = strategy(ctx);
     if (!task.valid()) throw std::invalid_argument("run_session: strategy produced no task");
@@ -46,6 +52,15 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
         // finest resolution the data provides, regardless of what timeframe the
         // strategy reasons in or what it currently happens to be awaiting.
         portfolio.process_risk_rules(market);
+
+        // Margin is sampled rather than recomputed every observation: it needs an
+        // implied-volatility solve per leg, and a per-second figure would cost
+        // far more than the precision is worth.
+        if (ev.ts >= next_margin) {
+            const MarginResult m = ctx.margin();
+            if (m.total.minor > result.peak_margin.minor) result.peak_margin = m.total;
+            next_margin = Timestamp{ev.ts.nanos + margin_interval};
+        }
 
         const EvalCtx eval{&market, &portfolio, ev.ts};
         int guard = 0;
@@ -79,6 +94,10 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
     result.oversized_fills   = portfolio.oversized_fills();
     result.cancelled_orders  = portfolio.cancelled_orders();
     result.trade_log         = portfolio.trades();
+    result.final_margin      = ctx.margin().total;
+    if (result.final_margin.minor > result.peak_margin.minor) {
+        result.peak_margin = result.final_margin;
+    }
     result.rules_fired       = portfolio.rules_fired();
 
     for (std::size_t i = 0; i < portfolio.size(); ++i) {

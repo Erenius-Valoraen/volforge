@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "volforge/margin.hpp"
 #include "volforge/strategy.hpp"
 
 #include <cstdint>
@@ -48,7 +49,14 @@ struct RunConfig {
 
     // Statutory charges and brokerage. Verify the rates against your broker;
     // they are configuration, not constants.
-    CostModel costs;
+    std::shared_ptr<const CostPolicy> costs;
+
+    // Margin model. Defaults to a SPAN-style scenario scan.
+    std::shared_ptr<const MarginModel> margin;
+
+    // How often margin is re-evaluated, in seconds. Every observation would mean
+    // an implied-volatility solve per leg per second for no useful precision.
+    int margin_sample_seconds = 60;
 };
 
 struct RunResult {
@@ -66,6 +74,9 @@ struct RunResult {
     std::size_t illiquid_fills   = 0;   // filled across a very wide spread
     std::size_t oversized_fills  = 0;   // larger than the size displayed at the touch
     std::size_t cancelled_orders = 0;   // opening orders withdrawn on close
+
+    Money       peak_margin{};          // largest requirement seen during the session
+    Money       final_margin{};         // requirement at the bell
     std::size_t rules_fired      = 0;   // attached stops/targets that triggered
     std::size_t unfilled_orders  = 0;   // still pending at session end
     std::size_t open_positions   = 0;   // still live at session end

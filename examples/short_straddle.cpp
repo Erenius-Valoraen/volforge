@@ -74,6 +74,12 @@ int main() {
     std::printf("  unrealized     %11.2f\n", result.unrealized.to_double());
     std::printf("  final equity   %11.2f\n\n", result.final_equity.to_double());
 
+    std::printf("  peak margin    %11.2f\n", result.peak_margin.to_double());
+    if (result.peak_margin.minor > 0) {
+        std::printf("  return on peak %10.2f%%\n\n",
+                    100.0 * result.final_equity.to_double() / result.peak_margin.to_double());
+    }
+
     // The two timestamp columns are the point. A decision at 09:20:00 does not
     // execute at 09:20:00 — it executes against the next observation.
     std::printf("  %-9s %-9s %-5s %-9s %6s %5s %10s\n",

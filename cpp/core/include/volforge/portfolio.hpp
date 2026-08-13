@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "volforge/costs.hpp"
 #include "volforge/data_source.hpp"
 
 #include <memory>
@@ -56,26 +57,9 @@ public:
 // Costs
 // ---------------------------------------------------------------------------
 
-// Transaction costs, applied to every fill.
-//
-// Omitting these is one of the largest sources of overstated returns in Indian
-// F&O backtesting: statutory charges alone run to roughly 0.14% of premium on a
-// round trip, which on a high-turnover intraday strategy is the difference
-// between a profitable system and a losing one.
-//
-// **Rates change.** These defaults were current for NSE equity options at the
-// time of writing and are the caller's responsibility to verify — they are
-// configuration, not constants.
-struct CostModel {
-    double stt_sell_pct   = 0.0010;      // 0.10% of premium, sell side only
-    double exchange_pct   = 0.00035;     // NSE transaction charge on premium
-    double sebi_pct       = 0.000001;    // ~Rs 10 per crore
-    double stamp_buy_pct  = 0.00003;     // 0.003% of premium, buy side only
-    double gst_pct        = 0.18;        // on brokerage + exchange + SEBI
-    Money  brokerage_per_order{2000};    // Rs 20.00, in minor units
-
-    [[nodiscard]] Money cost_of(Price price, Qty qty, Side side) const;
-};
+// Transaction costs live in costs.hpp as an injectable policy, so a broker with
+// a different structure — or the Python layer — can replace the calculation
+// outright rather than only tuning its rates.
 
 // ---------------------------------------------------------------------------
 // Legs
@@ -211,7 +195,7 @@ public:
     // already at the touch", which is a claim about infrastructure rather than a
     // parameter to tune, so it is recorded in the run manifest.
     Portfolio(std::shared_ptr<const FillModel> fills, std::int64_t execution_delay_nanos,
-              CostModel costs = {});
+              std::shared_ptr<const CostPolicy> costs = nullptr);
 
     // Submits the opening legs. Returns the position id immediately; the legs are
     // PendingOpen until process_pending fills them at a later timestamp.
@@ -267,7 +251,7 @@ private:
     std::vector<RiskRule>            rules_;
     std::vector<TradeRecord>         trades_;
     Money                            realized_{};
-    CostModel                        costs_;
+    std::shared_ptr<const CostPolicy> costs_;
     Money                            total_costs_{};
     std::size_t                      illiquid_fills_  = 0;
     std::size_t                      oversized_fills_ = 0;

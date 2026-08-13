@@ -99,8 +99,9 @@ double Position::pnl_pct(const MarketView& market) const {
 // ---------------------------------------------------------------------------
 
 Portfolio::Portfolio(std::shared_ptr<const FillModel> fills, std::int64_t execution_delay_nanos,
-                     CostModel costs)
-    : fills_(std::move(fills)), delay_(execution_delay_nanos), costs_(costs) {
+                     std::shared_ptr<const CostPolicy> costs)
+    : fills_(std::move(fills)), delay_(execution_delay_nanos),
+      costs_(costs ? std::move(costs) : default_cost_policy()) {
     if (!fills_) throw std::invalid_argument("Portfolio: null fill model");
     if (delay_ < 0) throw std::invalid_argument("Portfolio: negative execution delay");
 }
@@ -208,7 +209,9 @@ void Portfolio::process_pending(const MarketView& market) {
         const bool oversized = displayed > 0 && order.qty > displayed;
         if (oversized) ++oversized_fills_;
 
-        const Money cost = costs_.cost_of(*price, order.qty, order.side);
+        const CostContext cc{&market.registry().spec(order.instrument), *price,
+                             order.qty, order.side, false, Price{}};
+        const Money cost = costs_->cost_of(cc);
         total_costs_ = total_costs_ + cost;
 
         Position& pos = positions_[static_cast<std::size_t>(order.position)];
@@ -337,22 +340,5 @@ Money Portfolio::equity(const MarketView& market) const {
     return realized_ - total_costs_ + unrealized(market);
 }
 
-// ---------------------------------------------------------------------------
-// Costs
-// ---------------------------------------------------------------------------
-
-Money CostModel::cost_of(Price price, Qty qty, Side side) const {
-    const double premium = price.to_double() * static_cast<double>(qty);
-    if (!(premium > 0.0)) return brokerage_per_order;
-
-    double charges = premium * exchange_pct + premium * sebi_pct;
-    double taxes   = side == Side::Sell ? premium * stt_sell_pct : premium * stamp_buy_pct;
-
-    const double brokerage = static_cast<double>(brokerage_per_order.minor) / 100.0;
-    const double gst = (brokerage + charges) * gst_pct;
-
-    const double total = brokerage + charges + taxes + gst;
-    return Money{static_cast<std::int64_t>(std::llround(total * 100.0))};
-}
 
 }  // namespace volforge

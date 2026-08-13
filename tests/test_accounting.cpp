@@ -71,7 +71,7 @@ struct Book {
 // Costs off, so P&L assertions are about marking rather than charges.
 RunConfig no_costs() {
     RunConfig c;
-    c.costs = CostModel{0, 0, 0, 0, 0, Money{0}};
+    c.costs = std::make_shared<const NoCosts>();
     return c;
 }
 
@@ -264,19 +264,63 @@ TEST(costs_are_charged_on_every_fill_and_reported_separately) {
 }
 
 TEST(cost_of_a_round_trip_is_the_right_order_of_magnitude) {
-    const CostModel m;
-    // One lot of NIFTY at 200.00 premium: 75 * 200 = 15,000 notional per side.
-    const Money sell = m.cost_of(Price::from_double(200), 75, Side::Sell);
-    const Money buy  = m.cost_of(Price::from_double(200), 75, Side::Buy);
+    InstrumentRegistry reg;
+    InstrumentSpec spec;
+    spec.underlying = reg.intern_underlying("NIFTY");
+    spec.kind       = InstrumentKind::Option;
+    spec.expiry     = Date{20250703};
+    spec.strike     = Price::from_double(25000);
+    spec.right      = Right::Call;
+    spec.lot_size   = 75;
 
-    // Sell side carries STT and is the heavier of the two.
+    const IndianFnOCosts m;
+    auto charge = [&](Side side) {
+        return m.cost_of(CostContext{&spec, Price::from_double(200), 75, side, false, Price{}});
+    };
+
+    const Money sell = charge(Side::Sell);
+    const Money buy  = charge(Side::Buy);
+
+    // One lot of NIFTY at 200.00 premium is 15,000 of turnover per side. STT at
+    // 0.15% lands on the sell alone and dominates it, so the sell side is much
+    // the heavier of the two.
     CHECK(sell.to_double() > buy.to_double());
+    CHECK(std::abs(sell.to_double() - 52.4) < 1.5);
+    CHECK(std::abs(buy.to_double() - 30.4) < 1.5);
 
-    // Statutory charges plus two flat brokerages land in the tens of rupees on a
-    // 15,000 round trip — small per trade, decisive over a few hundred of them.
+    // Roughly 0.55% of one side's turnover on a round trip, most of it statutory.
     const double round_trip = sell.to_double() + buy.to_double();
-    CHECK(round_trip > 40.0);
-    CHECK(round_trip < 120.0);
+    CHECK(round_trip > 70.0);
+    CHECK(round_trip < 100.0);
+}
+
+TEST(costs_scale_with_turnover_and_brokerage_can_be_removed) {
+    InstrumentRegistry reg;
+    InstrumentSpec spec;
+    spec.underlying = reg.intern_underlying("NIFTY");
+    spec.kind       = InstrumentKind::Option;
+    spec.strike     = Price::from_double(25000);
+    spec.right      = Right::Call;
+    spec.lot_size   = 75;
+
+    const IndianFnOCosts standard;
+    const auto one  = standard.cost_of(
+        CostContext{&spec, Price::from_double(200), 75, Side::Sell, false, Price{}});
+    const auto ten  = standard.cost_of(
+        CostContext{&spec, Price::from_double(200), 750, Side::Sell, false, Price{}});
+
+    // Brokerage is flat per order, so ten lots cost less than ten single-lot
+    // tickets — the percentage components scale, the ticket does not.
+    CHECK(ten.to_double() < one.to_double() * 10.0);
+    CHECK(ten.to_double() > one.to_double());
+
+    // A zero-brokerage account is expressible without touching the engine.
+    IndianFnORates free_rates;
+    free_rates.brokerage_per_order = Money{0};
+    const IndianFnOCosts zero_brokerage(free_rates);
+    const auto cheap = zero_brokerage.cost_of(
+        CostContext{&spec, Price::from_double(200), 75, Side::Sell, false, Price{}});
+    CHECK(std::abs((one - cheap).to_double() - 20.0 * 1.18) < 0.05);
 }
 
 TEST(equity_separates_realized_costs_and_unrealized) {
