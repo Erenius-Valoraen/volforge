@@ -30,6 +30,10 @@ endif()
 add_subdirectory(cpp/core)
 add_subdirectory(examples)
 
+if(VOLFORGE_BUILD_PYTHON)
+    add_subdirectory(python)
+endif()
+
 if(VOLFORGE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
