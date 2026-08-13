@@ -11,6 +11,7 @@
 // reading is one sequential read and a pointer fix-up, with no parse at all.
 
 #include "volforge/gfdl_csv.hpp"
+#include "volforge/codec.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -18,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using namespace volforge;
@@ -130,6 +132,84 @@ BinaryDay read_binary(const std::string& path) {
     return day;
 }
 
+// --- codec-compressed variant ------------------------------------------------
+
+void write_codec(const SessionData& session, const std::string& path) {
+    std::vector<std::uint8_t> blob;
+    std::vector<std::int64_t> scratch;
+    std::vector<Entry> directory;
+
+    auto encode = [&](auto span) {
+        scratch.clear();
+        scratch.reserve(span.size());
+        for (const auto& v : span) {
+            if constexpr (std::is_same_v<std::decay_t<decltype(v)>, Timestamp>) {
+                scratch.push_back(v.nanos);
+            } else if constexpr (std::is_same_v<std::decay_t<decltype(v)>, Price>) {
+                scratch.push_back(v.minor);
+            } else {
+                scratch.push_back(static_cast<std::int64_t>(v));
+            }
+        }
+        encode_column(scratch.data(), scratch.size(), blob);
+    };
+
+    for (const InstrumentId id : session.instruments()) {
+        const auto c = session.quotes(id);
+        directory.push_back(Entry{index_of(id), static_cast<std::int32_t>(c.size()),
+                                  static_cast<std::int64_t>(blob.size())});
+        encode(c.ts); encode(c.last); encode(c.bid); encode(c.ask);
+        encode(c.bid_qty); encode(c.ask_qty); encode(c.last_qty); encode(c.open_interest);
+    }
+
+    Header h{};
+    std::memcpy(h.magic, "VFDAY002", 8);
+    h.date = session.date().yyyymmdd;
+    h.instrument_count = static_cast<std::int32_t>(directory.size());
+    h.row_count = static_cast<std::int64_t>(session.total_observations());
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(&h), sizeof(h));
+    out.write(reinterpret_cast<const char*>(directory.data()),
+              static_cast<std::streamsize>(directory.size() * sizeof(Entry)));
+    out.write(reinterpret_cast<const char*>(blob.data()),
+              static_cast<std::streamsize>(blob.size()));
+}
+
+std::size_t read_codec(const std::string& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    const auto size = static_cast<std::size_t>(in.tellg());
+    in.seekg(0);
+    std::vector<char> raw(size);
+    in.read(raw.data(), static_cast<std::streamsize>(size));
+
+    Header h{};
+    std::memcpy(&h, raw.data(), sizeof(Header));
+    std::vector<Entry> directory(static_cast<std::size_t>(h.instrument_count));
+    std::memcpy(directory.data(), raw.data() + sizeof(Header),
+                directory.size() * sizeof(Entry));
+
+    const auto* payload =
+        reinterpret_cast<const std::uint8_t*>(raw.data()) + sizeof(Header) +
+        directory.size() * sizeof(Entry);
+    const std::size_t payload_size = size - sizeof(Header) - directory.size() * sizeof(Entry);
+
+    std::size_t values = 0;
+    std::vector<std::int64_t> column;
+    for (const Entry& e : directory) {
+        const std::uint8_t* p = payload + e.offset;
+        std::size_t remaining = payload_size - static_cast<std::size_t>(e.offset);
+        for (int col = 0; col < 8; ++col) {
+            const std::size_t used = decode_column(p, remaining, column);
+            if (used == 0) return values;   // corrupt
+            p += used;
+            remaining -= used;
+            values += column.size();
+        }
+    }
+    return values;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -171,6 +251,16 @@ int main(int argc, char** argv) {
     BinaryDay reread = read_binary(bin);
     const double read = seconds_since(t0);
 
+    // --- 3b. codec-compressed form -------------------------------------------
+    const std::string packed = bin + ".packed";
+    t0 = SteadyClock::now();
+    write_codec(*day.session, packed);
+    const double cwrite = seconds_since(t0);
+
+    t0 = SteadyClock::now();
+    const std::size_t decoded_values = read_codec(packed);
+    const double cread = seconds_since(t0);
+
     // --- 4. replay, for scale ------------------------------------------------
     t0 = SteadyClock::now();
     std::size_t walked = 0;
@@ -193,8 +283,19 @@ int main(int argc, char** argv) {
     std::printf("  read binary         %7.2f s   %6.0f MB/s\n", read, binmb / read);
     std::printf("  replay all events   %7.2f s   %zu events\n\n", replay, walked);
 
-    std::printf("  binary load is %.0fx faster than CSV\n", csv / read);
-    std::printf("  a 197-session year: CSV %5.1f min   binary %5.1f s\n",
-                csv * 197 / 60.0, read * 197);
+    const double cmb = static_cast<double>(fs::file_size(packed)) / 1e6;
+    std::printf("  write packed        %7.2f s   -> %.1f MB  (%.2f bytes/row)\n",
+                cwrite, cmb, cmb * 1e6 / static_cast<double>(day.rows_read));
+    std::printf("  read packed         %7.2f s   %zu values decoded\n\n", cread,
+                decoded_values);
+
+    std::printf("  vs CSV        raw %5.1fx faster    packed %5.1fx faster\n",
+                csv / read, csv / cread);
+    std::printf("  size          CSV %6.0f MB    raw %6.0f MB    packed %6.1f MB\n",
+                mb, binmb, cmb);
+    std::printf("  197 sessions  CSV %5.1f min    raw %5.1f s / %4.1f GB    "
+                "packed %5.1f s / %4.1f GB\n",
+                csv * 197 / 60.0, read * 197, binmb * 197 / 1000.0,
+                cread * 197, cmb * 197 / 1000.0);
     return 0;
 }
