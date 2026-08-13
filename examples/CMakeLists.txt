@@ -15,3 +15,6 @@ target_link_libraries(convert PRIVATE volforge::core volforge::adapters volforge
 
 add_executable(inspect_day inspect_day.cpp)
 target_link_libraries(inspect_day PRIVATE volforge::core volforge::store)
+
+add_executable(verify_store verify_store.cpp)
+target_link_libraries(verify_store PRIVATE volforge::core volforge::store)
