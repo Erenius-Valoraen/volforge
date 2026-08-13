@@ -3,9 +3,14 @@
 A backtesting engine for options, built for people who need to trust the result.
 
 > **Status: early, but it runs.** Strategies execute end to end in C++ — data interface,
-> event loop, coroutines, bars and multi-timeframe, indicators, orders, fills and position
-> P&L, plus a whole-strategy look-ahead detector. Margin, Greeks, the storage layer and the
-> Python layer are not written yet, so this is not usable for real backtesting.
+> event loop, coroutines, bars and multi-timeframe, indicators, orders, fills, position P&L
+> and transaction costs, plus a whole-strategy look-ahead detector.
+>
+> Greeks, implied volatility and delta-based strike selection are in, priced off a forward
+> recovered from the chain by put-call parity — so they need no index feed at all.
+>
+> Margin, the storage layer and the Python layer are not written yet, so this is not usable
+> for real backtesting.
 >
 > Working examples: [short_straddle.cpp](examples/short_straddle.cpp),
 > [bollinger.cpp](examples/bollinger.cpp).
