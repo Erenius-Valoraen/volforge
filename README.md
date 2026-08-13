@@ -34,8 +34,11 @@ reporting fiction.
 **Every run is reproducible.** Runs emit a manifest — data version, engine version, config
 hash, fill model — so two results are always comparable.
 
-**Multi-leg positions are one object.** A condor has a net delta, a combined P&L and a
-single stop. It is not four independent orders.
+**Risk rules resolve at the level you apply them.** A position is a container of legs.
+Applied to the position, a stop uses the combined view; applied to a leg, it affects only
+that leg; the two mix freely. Grouping is not bookkeeping — margin on a defined-risk
+structure is materially lower than the sum of its legs, so a condor modelled as four
+independent orders reports capital usage a broker would never charge.
 
 ## Architecture
 
@@ -62,30 +65,45 @@ your strategies (private)  imports the above, ships nothing back
 
 ## What a strategy looks like
 
+A strategy is a coroutine. It reads as straight-line script, while the conditions it waits
+on compile to native code and run in C++.
+
 ```python
-from volforge import Strategy, params
-
-class ShortStraddle(Strategy):
-    entry_time = params.Time("09:20")
-    stop_pct   = params.Float(0.30, sweep=[0.2, 0.3, 0.4, 0.5])
-    target_pct = params.Float(0.50)
-
-    def setup(self, ctx):
-        ctx.schedule(self.entry_time, self.enter)
-
-    def enter(self, ctx):
-        legs = ctx.chain(dte=0).atm().straddle()
-        pos  = ctx.sell(legs, lots=1)
-        pos.stop_loss(pct=self.stop_pct)       # evaluated natively, every second
-        pos.take_profit(pct=self.target_pct)
-        pos.exit_at("15:15")
+@strategy
+async def short_straddle(stop=0.30, target=0.50, entry="09:20"):
+    await clock.at(entry)
+    pos = sell(chain(dte=0).atm().straddle(), lots=1)
+    await (pos.pnl_pct <= -stop) | (pos.pnl_pct >= target) | clock.at("15:15")
+    close(pos)
 ```
 
-Python runs twice per day here. The stop is evaluated 22,500 times per day in C++.
+Python wakes twice per session. The condition behind that `await` is evaluated 22,500 times
+per session natively.
 
-Because parameters are *declared* rather than hardcoded, sweeps are free — the engine knows
-the parameter space, parallelises across cores, and reuses each day's decoded data across
-every configuration. You never write a sweep loop.
+Risk rules attach at whatever level you want, and mix:
+
+```python
+pos.stop_loss(pct=0.30)           # combined position P&L
+pos.call.stop_loss(pct=0.60)      # that leg only
+close(pos.call)                   # continues as a naked short put
+```
+
+**Research lives outside the strategy.** A strategy describes what it *is*; an experiment
+describes what you're investigating. The strategy file has no idea sweeps exist.
+
+```python
+# research/stop_sensitivity.py
+grid = sweep(short_straddle,
+             stop=[0.2, 0.3, 0.4, 0.5],
+             target=arange(0.3, 0.8, 0.1),
+             data=nifty("2025"))
+
+grid.heatmap("stop", "target", metric="sharpe")
+```
+
+The same strategy can be swept different ways in different experiments without anyone
+editing it. Sweeps are parallelised across cores and reuse each day's decoded data across
+every configuration.
 
 See [docs/strategy-api.md](docs/strategy-api.md) for the full authoring model, and
 [docs/design.md](docs/design.md) for the architecture rationale and measurements.

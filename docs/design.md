@@ -97,9 +97,20 @@ loop was measured at 114 ns/row doing nothing but integer addition; realistic st
 logic runs 0.5–2 µs/row. Equivalent C++ runs at 2–10 ns/row.
 
 The resolution is that **Python configures the loop rather than running inside it.**
-Strategies declare intent — stops, targets, schedules, exit rules — and the engine
-evaluates those declarations natively. See §5 for the escape hatch when declaration is
-insufficient.
+
+Strategies are coroutines. `await <condition>` suspends the strategy, and the condition
+compiles to a native predicate evaluated in C++. Python resumes only when it fires, so a
+strategy wakes a handful of times per session while its conditions are checked 22,500 times.
+
+Coroutines were chosen over callback registration because a callback model cannot express
+sequence: "enter, wait, adjust, exit" has to be shredded across disconnected methods with
+state flags threaded between them. Suspension is also precisely the fact the engine needs —
+*this strategy is dormant until condition C holds* — so the abstraction and the
+implementation want the same thing.
+
+Conditions that cannot compile to native code are rejected unless explicitly wrapped in
+`slow()`. The cliff is therefore impossible to hit by accident, and every `slow()` condition
+is reported with its measured cost in the run summary.
 
 ## 4. Greeks without spot data
 
@@ -167,7 +178,45 @@ This lets user extensions be fast when possible without ever being blocked when 
 Chain selection is arbitrary Python by design. It runs a handful of times per day over ~900
 contracts — a few thousand predicate calls — so there is no reason to constrain it to a DSL.
 
-## 7. v1 scope
+## 7. Positions and legs
+
+A position is a container of legs, and **every risk rule and metric resolves at the level it
+is applied to** — position level uses the combined view, leg level affects only that leg,
+and the two mix within one position. Closing a leg leaves the remainder live.
+
+The grouping is not presentational. Margin on a defined-risk structure is materially lower
+than the sum of its legs priced independently, so modelling a condor as four separate
+positions would report capital usage no broker would charge, and therefore the wrong return
+on capital. Net Greeks, combined P&L percentage and position-level stops are likewise only
+meaningful against the group.
+
+This is why legs are addressable *within* a position rather than being separate positions
+that happen to be related.
+
+## 8. Live parity
+
+The same strategy source should eventually run against live data unchanged. The coroutine
+model already describes an event-driven system rather than a replay, which is most of what
+that requires — but three constraints must hold from the start or the promise cannot be
+kept retroactively:
+
+- **Every indicator has both a vectorized and a streaming implementation, with an
+  equivalence test asserting they agree.** Backtests precompute over the day; live must
+  compute incrementally. Without an enforced check the two implementations drift, and the
+  divergence would surface as unexplained live-versus-backtest mismatch.
+- **Clock, data and execution are injected interfaces**, never globals bound to replay.
+  Going live swaps implementations, not strategies.
+- **Orders are event-driven in both modes.** Fills arrive as events even in backtest, so
+  partial fills and rejections need no separate strategy code path.
+
+Two things will not transfer for free and should not be papered over. **Latency** exists
+live and not in replay, so results differ regardless of API fidelity. **Crash recovery** is
+the genuinely hard part: a live strategy that dies must resume holding open positions *and*
+at the right point in its own control flow, which makes a coroutine's execution position
+recoverable state. That is not yet designed, and it is the main open question for live
+support.
+
+## 9. v1 scope
 
 Intraday **and** overnight positional strategies on index options.
 
