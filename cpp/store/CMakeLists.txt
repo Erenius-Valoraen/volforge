@@ -1,5 +1,6 @@
 add_library(volforge_store
     src/codec.cpp
+    src/vfday.cpp
 )
 
 target_include_directories(volforge_store PUBLIC

@@ -86,6 +86,26 @@ public:
     // may cache the merged order alongside it. Returning empty is fine and means
     // EventCursor will merge on the fly.
     [[nodiscard]] virtual std::span<const Event> event_order() const { return {}; }
+
+    // Distinct observation times, ascending, or empty if the source does not
+    // keep them.
+    //
+    // Stepping through a session needs only these. A source that supplies them
+    // lets a replay advance through the day without decoding a single quote,
+    // which is what keeps memory proportional to what a strategy touches rather
+    // than to the size of the data.
+    [[nodiscard]] virtual std::span<const Timestamp> timeline() const { return {}; }
+
+    // Whether the instrument had printed by `t`.
+    //
+    // The default answers by looking, which costs whatever quotes() costs. A
+    // file-backed source overrides it with a directory lookup, because chain
+    // scans ask this of every strike and must not drag the whole day into
+    // memory to do it.
+    [[nodiscard]] virtual bool printed_by(InstrumentId id, Timestamp t) const {
+        const QuoteColumns cols = quotes(id);
+        return !cols.empty() && cols.index_at_or_before(t) != QuoteColumns::npos;
+    }
 };
 
 // ---------------------------------------------------------------------------

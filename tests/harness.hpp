@@ -49,7 +49,8 @@ inline int run_all() {
     int failed_cases = 0;
     for (const auto& tc : registry()) {
         const int before = failures();
-        std::printf("  %s\n", tc.name);
+        // stderr is unbuffered, so a crash still names the test that caused it.
+        std::fprintf(stderr, "  %s\n", tc.name);
         try {
             tc.fn();
         } catch (const std::exception& e) {

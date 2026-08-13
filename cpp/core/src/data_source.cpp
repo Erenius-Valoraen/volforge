@@ -109,8 +109,9 @@ std::optional<Quote> MarketView::quote(InstrumentId id, int back) const {
 }
 
 bool MarketView::has_quote(InstrumentId id) const {
-    const QuoteColumns cols = data_->quotes(id);
-    return !cols.empty() && cols.index_at_or_before(clock_->now()) != QuoteColumns::npos;
+    // Routed through the session so a file-backed source can answer from its
+    // directory instead of decoding the instrument.
+    return data_->printed_by(id, clock_->now());
 }
 
 }  // namespace volforge

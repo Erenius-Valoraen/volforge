@@ -1,5 +1,7 @@
 #include "volforge/gfdl_csv.hpp"
 
+#include "miniz.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -124,6 +126,96 @@ ParsedSymbol parse_gfdl_symbol(std::string_view ticker) {
     return out;
 }
 
+
+// Parses one CSV buffer into the session. Shared by the directory and zip paths
+// so the two can never drift apart in how they interpret a row.
+struct RowSink {
+    std::shared_ptr<MemorySessionData>* session;
+    Date*                               date;
+    std::size_t*                        rows_read;
+    std::size_t*                        rows_skipped;
+    const InstrumentRegistry*           registry;
+};
+
+Date parse_csv_rows(const char* data, std::size_t size, InstrumentId id,
+                    const GfdlLoadOptions& options, const RowSink& sink) {
+    const char* p   = data;
+    const char* end = p + size;
+
+    if (end - p > 6 && std::strncmp(p, "Ticker", 6) == 0) {
+        while (p < end && *p != '\n') ++p;
+        if (p < end) ++p;
+    }
+
+    Date      row_date;
+    Timestamp previous{};
+    bool      have_previous = false;
+
+    while (p < end) {
+        if (*p == '\n' || *p == '\n') { ++p; continue; }
+
+        skip_field(p, end);                                   // Ticker
+
+        const std::int64_t dd = scan_int(p, end);
+        if (p < end && *p == '/') ++p;
+        const std::int64_t mm = scan_int(p, end);
+        if (p < end && *p == '/') ++p;
+        const std::int64_t yyyy = scan_int(p, end);
+        if (p < end && *p == ',') ++p;
+
+        const std::int64_t hh = scan_int(p, end);
+        if (p < end && *p == ':') ++p;
+        const std::int64_t mi = scan_int(p, end);
+        if (p < end && *p == ':') ++p;
+        const std::int64_t ss = scan_int(p, end);
+        if (p < end && *p == ',') ++p;
+
+        Quote q;
+        q.last = Price::from_minor(scan_price_minor(p, end));
+        if (p < end && *p == ',') ++p;
+        q.bid = Price::from_minor(scan_price_minor(p, end));
+        if (p < end && *p == ',') ++p;
+        q.bid_qty = static_cast<Qty>(scan_int(p, end));
+        if (p < end && *p == ',') ++p;
+        q.ask = Price::from_minor(scan_price_minor(p, end));
+        if (p < end && *p == ',') ++p;
+        q.ask_qty = static_cast<Qty>(scan_int(p, end));
+        if (p < end && *p == ',') ++p;
+        q.last_qty = static_cast<Qty>(scan_int(p, end));
+        if (p < end && *p == ',') ++p;
+        q.open_interest = scan_int(p, end);
+
+        while (p < end && *p != '\n') ++p;
+        if (p < end) ++p;
+
+        if (yyyy < 1970 || mm < 1 || mm > 12 || dd < 1 || dd > 31 ||
+            hh < 0 || hh > 23 || mi < 0 || mi > 59 || ss < 0 || ss > 59) {
+            ++*sink.rows_skipped;
+            continue;
+        }
+
+        const Date d{static_cast<std::int32_t>(yyyy * 10000 + mm * 100 + dd)};
+        if (!row_date.valid()) row_date = d;
+
+        q.ts = timestamp_of(d, static_cast<int>(hh * 3600 + mi * 60 + ss),
+                            options.utc_offset_seconds);
+
+        // The feed is time-ordered within a file; anything else is corrupt and
+        // is dropped rather than silently reordered.
+        if (have_previous && q.ts < previous) { ++*sink.rows_skipped; continue; }
+        previous = q.ts;
+        have_previous = true;
+
+        if (!*sink.session) {
+            *sink.session = std::make_shared<MemorySessionData>(d, *sink.registry);
+            *sink.date = d;
+        }
+        (*sink.session)->append(id, q);
+        ++*sink.rows_read;
+    }
+    return row_date;
+}
+
 GfdlDay load_gfdl_day(InstrumentRegistry& registry, const std::string& directory,
                       const GfdlLoadOptions& options) {
     namespace fs = std::filesystem;
@@ -182,83 +274,9 @@ GfdlDay load_gfdl_day(InstrumentRegistry& registry, const std::string& directory
 
         expiries.insert(sym.expiry.yyyymmdd);
 
-        const char* p   = buffer.data();
-        const char* end = p + buffer.size();
-
-        // Skip the header line if present.
-        if (end - p > 6 && std::strncmp(p, "Ticker", 6) == 0) {
-            while (p < end && *p != '\n') ++p;
-            if (p < end) ++p;
-        }
-
-        Date      row_date;
-        Timestamp previous{};
-        bool      have_previous = false;
-
-        while (p < end) {
-            if (*p == '\r' || *p == '\n') { ++p; continue; }
-
-            skip_field(p, end);                                   // Ticker
-
-            // Date, dd/mm/yyyy
-            const std::int64_t dd = scan_int(p, end);
-            if (p < end && *p == '/') ++p;
-            const std::int64_t mm = scan_int(p, end);
-            if (p < end && *p == '/') ++p;
-            const std::int64_t yyyy = scan_int(p, end);
-            if (p < end && *p == ',') ++p;
-
-            // Time, HH:MM:SS
-            const std::int64_t hh = scan_int(p, end);
-            if (p < end && *p == ':') ++p;
-            const std::int64_t mi = scan_int(p, end);
-            if (p < end && *p == ':') ++p;
-            const std::int64_t ss = scan_int(p, end);
-            if (p < end && *p == ',') ++p;
-
-            Quote q;
-            q.last = Price::from_minor(scan_price_minor(p, end));
-            if (p < end && *p == ',') ++p;
-            q.bid = Price::from_minor(scan_price_minor(p, end));
-            if (p < end && *p == ',') ++p;
-            q.bid_qty = static_cast<Qty>(scan_int(p, end));
-            if (p < end && *p == ',') ++p;
-            q.ask = Price::from_minor(scan_price_minor(p, end));
-            if (p < end && *p == ',') ++p;
-            q.ask_qty = static_cast<Qty>(scan_int(p, end));
-            if (p < end && *p == ',') ++p;
-            q.last_qty = static_cast<Qty>(scan_int(p, end));
-            if (p < end && *p == ',') ++p;
-            q.open_interest = scan_int(p, end);
-
-            while (p < end && *p != '\n') ++p;
-            if (p < end) ++p;
-
-            if (yyyy < 1970 || mm < 1 || mm > 12 || dd < 1 || dd > 31 ||
-                hh < 0 || hh > 23 || mi < 0 || mi > 59 || ss < 0 || ss > 59) {
-                ++out.rows_skipped;
-                continue;
-            }
-
-            const Date d{static_cast<std::int32_t>(yyyy * 10000 + mm * 100 + dd)};
-            if (!row_date.valid()) row_date = d;
-
-            q.ts = timestamp_of(d, static_cast<int>(hh * 3600 + mi * 60 + ss),
-                                options.utc_offset_seconds);
-
-            // The feed is time-ordered within a file; anything else is corrupt
-            // and is dropped rather than silently reordered.
-            if (have_previous && q.ts < previous) { ++out.rows_skipped; continue; }
-            previous = q.ts;
-            have_previous = true;
-
-            if (!out.session) {
-                out.session = std::make_shared<MemorySessionData>(d, registry);
-                out.date = d;
-            }
-            out.session->append(id, q);
-            ++out.rows_read;
-        }
+        const RowSink sink{&out.session, &out.date, &out.rows_read, &out.rows_skipped,
+                           &registry};
+        const Date row_date = parse_csv_rows(buffer.data(), buffer.size(), id, options, sink);
 
         ++out.files_read;
         if (row_date.valid() && out.date.valid() && row_date != out.date) {
@@ -273,6 +291,99 @@ GfdlDay load_gfdl_day(InstrumentRegistry& registry, const std::string& directory
     for (const std::int32_t e : expiries) out.expiries.push_back(Date{e});
 
     if (out.session) out.session->build_event_order();
+    return out;
+}
+
+
+
+GfdlDay load_gfdl_zip(InstrumentRegistry& registry, const std::string& zip_path,
+                      const GfdlLoadOptions& options) {
+    GfdlDay out;
+
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_file(&zip, zip_path.c_str(), 0)) {
+        out.warnings.push_back("cannot open zip: " + zip_path);
+        return out;
+    }
+
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+
+    // Entries are visited in name order so instrument ids come out the same on
+    // every run, whatever order the archive happens to store them in.
+    std::vector<std::pair<std::string, mz_uint>> entries;
+    entries.reserve(count);
+    for (mz_uint i = 0; i < count; ++i) {
+        if (mz_zip_reader_is_file_a_directory(&zip, i)) continue;
+        char name[512];
+        const mz_uint n = mz_zip_reader_get_filename(&zip, i, name, sizeof(name));
+        if (n == 0) continue;
+        entries.emplace_back(std::string(name), i);
+    }
+    std::sort(entries.begin(), entries.end());
+
+    for (const auto& [name, index] : entries) {
+        // Only the leaf matters; the archive nests files under a dated folder.
+        const auto slash = name.find_last_of("/\\\\");
+        const std::string leaf = slash == std::string::npos ? name : name.substr(slash + 1);
+
+        const ParsedSymbol sym = parse_gfdl_symbol(leaf);
+        if (!sym.ok) {
+            ++out.files_skipped;
+            if (leaf.size() > 4) out.warnings.push_back("unparsable symbol: " + leaf);
+            continue;
+        }
+        if (!options.only_underlying.empty() && sym.underlying != options.only_underlying) {
+            ++out.files_skipped;
+            continue;
+        }
+
+        std::size_t bytes = 0;
+        void* raw = mz_zip_reader_extract_to_heap(&zip, index, &bytes, 0);
+        if (raw == nullptr) {
+            // A member that will not inflate is reported, never quietly dropped:
+            // a day silently missing a contract is a day that backtests wrongly.
+            ++out.files_skipped;
+            out.warnings.push_back("could not decompress: " + leaf);
+            continue;
+        }
+
+        out.underlying = registry.intern_underlying(sym.underlying);
+
+        InstrumentSpec spec;
+        spec.underlying = out.underlying;
+        spec.kind       = InstrumentKind::Option;
+        spec.expiry     = sym.expiry;
+        spec.strike     = sym.strike;
+        spec.right      = sym.right;
+        spec.lot_size   = options.lot_size;
+        spec.tick_size  = options.tick_size;
+        const InstrumentId id = registry.add(spec);
+
+        const RowSink sink{&out.session, &out.date, &out.rows_read, &out.rows_skipped,
+                           &registry};
+        const Date row_date =
+            parse_csv_rows(static_cast<const char*>(raw), bytes, id, options, sink);
+        mz_free(raw);
+
+        ++out.files_read;
+        if (row_date.valid() && out.date.valid() && row_date != out.date) {
+            out.warnings.push_back(leaf + " carries date " + row_date.to_string() +
+                                   ", expected " + out.date.to_string());
+        }
+    }
+
+    mz_zip_reader_end(&zip);
+
+    std::set<std::int32_t> expiries;
+    if (out.session) {
+        for (const InstrumentId id : out.session->instruments()) {
+            const InstrumentSpec& spec = registry.spec(id);
+            if (spec.expiry.valid()) expiries.insert(spec.expiry.yyyymmdd);
+        }
+        out.session->build_event_order();
+    }
+    for (const std::int32_t e : expiries) out.expiries.push_back(Date{e});
+
     return out;
 }
 

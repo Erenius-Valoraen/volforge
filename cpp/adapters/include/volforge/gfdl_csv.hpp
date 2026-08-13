@@ -69,6 +69,15 @@ struct GfdlDay {
 GfdlDay load_gfdl_day(InstrumentRegistry& registry, const std::string& directory,
                       const GfdlLoadOptions& options = {});
 
+// Parses one day straight out of a vendor .zip, without expanding it to disk.
+//
+// This is the path that matters at scale: a year of NIFTY options is 14 GB
+// zipped and roughly 145 GB as CSV, so writing the intermediate out is not an
+// option on most machines. Files are decompressed one at a time, so peak memory
+// is one CSV plus the session being built.
+GfdlDay load_gfdl_zip(InstrumentRegistry& registry, const std::string& zip_path,
+                      const GfdlLoadOptions& options = {});
+
 // Decomposes a vendor ticker such as "NIFTY03JUL2523000CE.NFO".
 struct ParsedSymbol {
     std::string  underlying;

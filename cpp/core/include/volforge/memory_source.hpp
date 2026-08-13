@@ -35,6 +35,7 @@ public:
     [[nodiscard]] QuoteColumns quotes(InstrumentId) const override;
     [[nodiscard]] std::size_t total_observations() const override { return total_; }
     [[nodiscard]] std::span<const Event> event_order() const override { return order_; }
+    [[nodiscard]] std::span<const Timestamp> timeline() const override { return timeline_; }
 
 private:
     struct Series {
@@ -51,6 +52,7 @@ private:
     std::map<std::int32_t, Series>       series_;      // ordered, so ids stay deterministic
     std::vector<InstrumentId>            instruments_;
     std::vector<Event>                   order_;
+    std::vector<Timestamp>               timeline_;
     std::size_t                          total_ = 0;
 };
 

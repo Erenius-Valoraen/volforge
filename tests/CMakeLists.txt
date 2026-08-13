@@ -10,6 +10,7 @@ add_executable(volforge_tests
     test_backtest.cpp
     test_gfdl.cpp
     test_codec.cpp
+    test_vfday.cpp
 )
 
 target_link_libraries(volforge_tests PRIVATE volforge::core volforge::adapters volforge::store)

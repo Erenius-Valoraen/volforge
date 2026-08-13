@@ -35,7 +35,8 @@ void MemorySessionData::append(InstrumentId id, const Quote& q) {
     s.last_qty.push_back(q.last_qty);
     s.open_interest.push_back(q.open_interest);
     ++total_;
-    order_.clear();   // any cached merge order is now stale
+    order_.clear();      // any cached merge order is now stale
+    timeline_.clear();
 }
 
 QuoteColumns MemorySessionData::quotes(InstrumentId id) const {
@@ -58,11 +59,18 @@ void MemorySessionData::build_event_order() {
     // Stable ordering on (time, instrument, row). The instrument tiebreak keeps
     // replay deterministic when many instruments print in the same second, which
     // at 1-second resolution is most of them.
+    timeline_.clear();
     std::sort(order_.begin(), order_.end(), [](const Event& a, const Event& b) {
         if (a.ts != b.ts) return a.ts < b.ts;
         if (a.instrument != b.instrument) return index_of(a.instrument) < index_of(b.instrument);
         return a.row < b.row;
     });
+
+    timeline_.reserve(order_.size());
+    for (const Event& e : order_) {
+        if (timeline_.empty() || timeline_.back() != e.ts) timeline_.push_back(e.ts);
+    }
+    timeline_.shrink_to_fit();
 }
 
 // ---------------------------------------------------------------------------
