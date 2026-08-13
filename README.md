@@ -18,10 +18,12 @@ able to read exactly which fill, margin, and causality rules produced that numbe
 
 ## Design principles
 
-**Look-ahead is impossible, not merely discouraged.** The context object at time *T* has no
-accessor for data after *T*. Custom indicators are pure functions, so the engine verifies
-causality automatically by checking `f(data[:k]) == f(data)[:k]` for random `k`. An
-indicator that peeks at the future is rejected, and the check cannot be disabled.
+**Look-ahead is impossible, not merely discouraged.** There is no accessor for data after the
+current simulation time — `close[-1]` raises rather than returning a value. Custom indicators
+are pure functions, so the engine verifies causality automatically by checking
+`f(data[:k]) == f(data)[:k]` for random `k`, and rejects any indicator that peeks. Higher
+timeframes expose only *completed* bars, so the repainting class of bug has no entry point:
+reading a bar that is still forming requires writing `.forming` on purpose.
 
 **Fills are pessimistic by default.** Source data is 1-second top-of-book snapshots, so
 sub-second queue position is unknowable and the engine never pretends otherwise. The
@@ -105,8 +107,12 @@ The same strategy can be swept different ways in different experiments without a
 editing it. Sweeps are parallelised across cores and reuse each day's decoded data across
 every configuration.
 
-See [docs/strategy-api.md](docs/strategy-api.md) for the full authoring model, and
-[docs/design.md](docs/design.md) for the architecture rationale and measurements.
+Documentation:
+
+- [docs/strategy-api.md](docs/strategy-api.md) — the full authoring model
+- [docs/series-and-timeframes.md](docs/series-and-timeframes.md) — history access, resampling, multi-timeframe
+- [docs/design.md](docs/design.md) — architecture rationale and measurements
+- [docs/pinescript-lessons.md](docs/pinescript-lessons.md) — what we're deliberately doing differently, and why
 
 ## Scope
 
