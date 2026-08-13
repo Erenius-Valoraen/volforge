@@ -1,0 +1,198 @@
+// Positions, legs, orders and fills.
+//
+// A position is a container of legs and is the unit that risk rules and metrics
+// resolve against. Applied to a position they use the combined view; applied to a
+// leg they affect only that leg. Grouping is not presentational — margin on a
+// defined-risk structure is materially lower than the sum of its legs, so a
+// condor modelled as four positions reports capital no broker would block.
+//
+// Orders are *pending* between submission and fill. A strategy that learns a
+// price at T cannot also have traded on it at T, so an order never fills against
+// the observation that triggered it. See docs/execution-semantics.md section 4.
+
+#pragma once
+
+#include "volforge/data_source.hpp"
+
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace volforge {
+
+enum class Side : std::uint8_t { Buy, Sell };
+
+constexpr Side opposite(Side s) { return s == Side::Buy ? Side::Sell : Side::Buy; }
+
+// ---------------------------------------------------------------------------
+// Fills
+// ---------------------------------------------------------------------------
+
+// How an order becomes a price.
+//
+// The default crosses the spread, which is not conservatism for its own sake:
+// the feed carries 1-second top-of-book snapshots, so sub-second queue position
+// is unknowable. Filling at mid claims an execution the data cannot support.
+class FillModel {
+public:
+    virtual ~FillModel() = default;
+
+    // The fill price, or nullopt when there is no market to trade against.
+    [[nodiscard]] virtual std::optional<Price> fill(const Quote& q, Side side, Qty qty) const = 0;
+
+    // Spread as a fraction of mid, beyond which a fill is flagged. Deep wings in
+    // the sample day quote 2.5% wide, and filling there silently tells a story
+    // about liquidity that did not exist.
+    [[nodiscard]] virtual double illiquid_spread_ratio() const { return 0.02; }
+};
+
+class CrossSpreadFill final : public FillModel {
+public:
+    [[nodiscard]] std::optional<Price> fill(const Quote& q, Side side, Qty) const override;
+};
+
+// ---------------------------------------------------------------------------
+// Legs
+// ---------------------------------------------------------------------------
+
+enum class LegState : std::uint8_t {
+    PendingOpen,   // submitted, not yet filled
+    Open,
+    PendingClose,
+    Closed,
+};
+
+struct Leg {
+    InstrumentId instrument = InstrumentId::Invalid;
+    Qty          qty        = 0;      // signed: negative is short
+    LegState     state      = LegState::PendingOpen;
+
+    Price     entry;
+    Timestamp entry_ts{};
+    Price     exit;
+    Timestamp exit_ts{};
+
+    [[nodiscard]] bool is_short() const { return qty < 0; }
+    [[nodiscard]] bool filled() const {
+        return state == LegState::Open || state == LegState::PendingClose ||
+               state == LegState::Closed;
+    }
+    [[nodiscard]] bool live() const {
+        return state == LegState::Open || state == LegState::PendingClose;
+    }
+    [[nodiscard]] Side closing_side() const { return qty < 0 ? Side::Buy : Side::Sell; }
+};
+
+using PositionId = std::int32_t;
+
+class Position {
+public:
+    Position(PositionId id, std::string label) : id_(id), label_(std::move(label)) {}
+
+    [[nodiscard]] PositionId id() const { return id_; }
+    [[nodiscard]] const std::string& label() const { return label_; }
+    [[nodiscard]] const std::vector<Leg>& legs() const { return legs_; }
+    [[nodiscard]] std::vector<Leg>& legs() { return legs_; }
+
+    // True once every leg has filled. P&L is meaningless before this.
+    [[nodiscard]] bool established() const;
+    [[nodiscard]] bool open() const;     // any leg still live
+    [[nodiscard]] bool closed() const;   // established, and nothing live
+
+    // Premium paid (positive) or collected (negative) across filled legs.
+    [[nodiscard]] Money entry_notional() const;
+
+    // Mark-to-market at *exit-side* prices: a short leg marks at the ask it would
+    // be bought back at, a long leg at the bid it would be sold into. Marking at
+    // mid reports profit that closing would not realise.
+    [[nodiscard]] Money pnl(const MarketView& market) const;
+
+    // P&L as a fraction of premium at risk — the familiar "30% of credit
+    // collected" stop. Zero until the position is established.
+    [[nodiscard]] double pnl_pct(const MarketView& market) const;
+
+    [[nodiscard]] Money pnl_of(std::size_t leg_index, const MarketView& market) const;
+
+private:
+    PositionId       id_;
+    std::string      label_;
+    std::vector<Leg> legs_;
+};
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+struct PendingOrder {
+    PositionId   position   = -1;
+    std::size_t  leg_index  = 0;
+    InstrumentId instrument = InstrumentId::Invalid;
+    Side         side       = Side::Buy;
+    Qty          qty        = 0;
+    Timestamp    submitted_at{};
+    Timestamp    eligible_at{};   // cannot fill before this
+    bool         closing    = false;
+};
+
+struct TradeRecord {
+    Timestamp    signal_ts{};    // when the strategy decided
+    Timestamp    fill_ts{};      // when it actually executed
+    PositionId   position   = -1;
+    InstrumentId instrument = InstrumentId::Invalid;
+    Side         side       = Side::Buy;
+    Qty          qty        = 0;
+    Price        price;
+    bool         illiquid   = false;
+};
+
+// ---------------------------------------------------------------------------
+// Portfolio
+// ---------------------------------------------------------------------------
+
+class Portfolio {
+public:
+    // `execution_delay` is the minimum gap between a decision and a fill. One
+    // base interval by default. Zero is permitted but means "a resting order was
+    // already at the touch", which is a claim about infrastructure rather than a
+    // parameter to tune, so it is recorded in the run manifest.
+    Portfolio(std::shared_ptr<const FillModel> fills, std::int64_t execution_delay_nanos);
+
+    // Submits the opening legs. Returns the position id immediately; the legs are
+    // PendingOpen until process_pending fills them at a later timestamp.
+    PositionId submit_open(std::string label, const std::vector<InstrumentId>& instruments,
+                           Side side, Qty qty_per_leg, Timestamp now);
+
+    void submit_close(PositionId id, Timestamp now);
+    void submit_close_leg(PositionId id, std::size_t leg_index, Timestamp now);
+
+    // Fills whatever has become eligible. Called by the event loop once per
+    // timestamp, before conditions are evaluated.
+    void process_pending(const MarketView& market);
+
+    [[nodiscard]] const Position& at(PositionId id) const;
+    [[nodiscard]] Position& at(PositionId id);
+    [[nodiscard]] std::size_t size() const { return positions_.size(); }
+    [[nodiscard]] std::size_t pending_orders() const { return pending_.size(); }
+
+    [[nodiscard]] Money realized() const { return realized_; }
+    [[nodiscard]] Money unrealized(const MarketView& market) const;
+    [[nodiscard]] Money equity(const MarketView& market) const;
+
+    [[nodiscard]] const std::vector<TradeRecord>& trades() const { return trades_; }
+    [[nodiscard]] std::size_t illiquid_fills() const { return illiquid_fills_; }
+    [[nodiscard]] std::int64_t execution_delay_nanos() const { return delay_; }
+
+private:
+    void submit(PendingOrder order);
+
+    std::shared_ptr<const FillModel> fills_;
+    std::int64_t                     delay_;
+    std::vector<Position>            positions_;
+    std::vector<PendingOrder>        pending_;
+    std::vector<TradeRecord>         trades_;
+    Money                            realized_{};
+    std::size_t                      illiquid_fills_ = 0;
+};
+
+}  // namespace volforge

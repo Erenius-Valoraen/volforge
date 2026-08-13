@@ -28,6 +28,7 @@ endif()
 #   python    — strategy API bindings
 
 add_subdirectory(cpp/core)
+add_subdirectory(examples)
 
 if(VOLFORGE_BUILD_TESTS)
     enable_testing()

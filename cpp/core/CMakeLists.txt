@@ -5,6 +5,10 @@ add_library(volforge_core
     src/data_source.cpp
     src/memory_source.cpp
     src/synthetic.cpp
+    src/condition.cpp
+    src/portfolio.cpp
+    src/strategy.cpp
+    src/event_loop.cpp
 )
 
 target_include_directories(volforge_core PUBLIC

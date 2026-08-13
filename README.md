@@ -2,11 +2,12 @@
 
 A backtesting engine for options, built for people who need to trust the result.
 
-> **Status: early.** The architecture below is settled and the data abstraction layer is in
-> place — instrument registry, quote columns, session and event iteration, the time-bounded
-> market view, and a synthetic data generator to develop against. The event loop, indicators,
-> fills, margin and the Python layer are not written yet, and nothing here is usable for
-> backtesting.
+> **Status: early, but it runs.** A strategy executes end to end in C++ — data interface,
+> event loop, coroutine strategies, orders, fills and position P&L, against generated data.
+> Indicators, bars and multi-timeframe, margin, Greeks and the Python layer are not written
+> yet, so this is not usable for real backtesting.
+>
+> See [examples/short_straddle.cpp](examples/short_straddle.cpp) for a working strategy.
 >
 > The storage layer is deliberately unspecified pending a vendor format decision; the engine
 > is written against the abstraction, not the format.
@@ -118,6 +119,7 @@ Documentation:
 - [docs/strategy-api.md](docs/strategy-api.md) — the full authoring model
 - [docs/series-and-timeframes.md](docs/series-and-timeframes.md) — history access, resampling, multi-timeframe
 - [docs/design.md](docs/design.md) — architecture rationale and measurements
+- [docs/execution-semantics.md](docs/execution-semantics.md) — signal time vs fill time, confirmation policy, and where look-ahead really comes from
 - [docs/pinescript-lessons.md](docs/pinescript-lessons.md) — what we're deliberately doing differently, and why
 
 ## Scope
