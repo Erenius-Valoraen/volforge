@@ -141,6 +141,7 @@ Documentation:
 
 - [docs/strategy-api.md](docs/strategy-api.md) — the full authoring model
 - [docs/series-and-timeframes.md](docs/series-and-timeframes.md) — history access, resampling, multi-timeframe
+- [docs/vfday-format.md](docs/vfday-format.md) — the day store's on-disk format, byte for byte, with a runnable reference reader
 - [docs/sessions-and-expiry.md](docs/sessions-and-expiry.md) — multi-session runs, overnight carry, and what happens at expiry
 - [docs/costs-and-margin.md](docs/costs-and-margin.md) — verified charge rates, SPAN methodology, and where both are known to be wrong
 - [docs/design.md](docs/design.md) — architecture rationale and measurements
