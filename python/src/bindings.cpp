@@ -21,6 +21,7 @@
 
 #include "volforge/backtest.hpp"
 #include "volforge/gfdl_csv.hpp"
+#include "volforge/vfday.hpp"
 #include "volforge/indicators.hpp"
 #include "volforge/synthetic.hpp"
 
@@ -32,6 +33,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -114,7 +116,7 @@ StrategyFn make_strategy(nb::object factory) {
 // makes that true from Python.
 struct Dataset {
     std::shared_ptr<InstrumentRegistry> registry = std::make_shared<InstrumentRegistry>();
-    std::shared_ptr<MemoryDataSource>   source;
+    std::shared_ptr<DataSource>         source;
     UnderlyingId              underlying{};
     InstrumentId              spot = InstrumentId::Invalid;
     std::vector<Date>         dates;
@@ -159,8 +161,43 @@ std::shared_ptr<Dataset> load_gfdl(const std::string& directory, Qty lot_size,
     d->rows_skipped  = day.rows_skipped;
     d->warnings      = day.warnings;
 
-    d->source = std::make_shared<MemoryDataSource>(*d->registry);
-    d->source->add_session(day.session);
+    auto memory = std::make_shared<MemoryDataSource>(*d->registry);
+    memory->add_session(day.session);
+    d->source = std::move(memory);
+    return d;
+}
+
+// Opens a converted day store.
+//
+// Sessions are validated as they are indexed, so a damaged file is reported here
+// rather than part-way through a backtest. Nothing is decoded until a strategy
+// asks for an instrument.
+std::shared_ptr<Dataset> open_store(const std::string& directory) {
+    auto d = std::make_shared<Dataset>();
+    auto source = std::make_shared<VfdaySource>(directory, *d->registry);
+
+    d->dates = source->sessions();
+    if (d->dates.empty()) {
+        std::string why = "no readable sessions in " + directory;
+        if (!source->problems().empty()) why += ": " + source->problems().front();
+        throw std::runtime_error(why);
+    }
+    d->warnings = source->problems();
+
+    // The feed carries options only, so there is no index instrument. Strike
+    // selection and Greeks both work off a parity forward instead.
+    d->spot = InstrumentId::Invalid;
+    for (const InstrumentSpec& spec : d->registry->all()) {
+        if (spec.is_option()) { d->underlying = spec.underlying; break; }
+    }
+
+    std::set<std::int32_t> expiries;
+    for (const InstrumentSpec& spec : d->registry->all()) {
+        if (spec.is_option() && spec.expiry.valid()) expiries.insert(spec.expiry.yyyymmdd);
+    }
+    for (const std::int32_t e : expiries) d->expiries.push_back(Date{e});
+
+    d->source = std::move(source);
     return d;
 }
 
@@ -542,6 +579,7 @@ NB_MODULE(_volforge, m) {
 
     m.def("make_synthetic", &make_synthetic, "config"_a);
     m.def("load_gfdl", &load_gfdl, "directory"_a, "lot_size"_a, "only_underlying"_a = "");
+    m.def("open_store", &open_store, "directory"_a);
 
     m.def("parse_symbol", [](const std::string& ticker) {
         const ParsedSymbol s = parse_gfdl_symbol(ticker);

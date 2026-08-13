@@ -55,6 +55,7 @@ __all__ = [
     "backtest",
     "synthetic",
     "load_gfdl",
+    "open_store",
     "parse_symbol",
     "describe",
     "BacktestConfig",
@@ -137,6 +138,17 @@ def load_gfdl(directory: str, *, lot_size: int, only_underlying: str = "") -> An
     universe is "strikes that traded", not "strikes that were listed".
     """
     return _core.load_gfdl(directory, lot_size, only_underlying)
+
+
+def open_store(directory: str) -> Any:
+    """Opens a converted day store.
+
+    Each session is validated as it is indexed, so a damaged file is reported
+    here rather than part-way through a backtest. Nothing is decoded until a
+    strategy asks for an instrument, so memory tracks what a strategy touches
+    rather than the size of the store.
+    """
+    return _core.open_store(directory)
 
 
 def parse_symbol(ticker: str) -> dict:

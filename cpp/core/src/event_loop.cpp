@@ -34,16 +34,28 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
     // evaluated for the first time at the session's first timestamp.
     task.resume();
 
-    EventCursor cursor(session);
-    Event       ev;
-    Timestamp   last{std::numeric_limits<std::int64_t>::min()};
+    // Walk the source's timeline when it has one: merging events would decode
+    // every instrument, which defeats a store that decodes on demand.
+    const auto timeline = session.timeline();
+    std::vector<Timestamp> derived;
+    if (timeline.empty()) {
+        EventCursor cursor(session);
+        Event ev;
+        Timestamp seen{std::numeric_limits<std::int64_t>::min()};
+        while (cursor.next(ev)) {
+            ++result.observations;
+            if (ev.ts == seen) continue;
+            seen = ev.ts;
+            derived.push_back(ev.ts);
+        }
+    } else {
+        result.observations += session.total_observations();
+    }
+    const std::span<const Timestamp> steps =
+        timeline.empty() ? std::span<const Timestamp>(derived) : timeline;
 
-    while (cursor.next(ev)) {
-        ++result.observations;
-        if (ev.ts == last) continue;   // same timestamp, already stepped
-        last = ev.ts;
-
-        clock.advance_to(ev.ts);
+    for (const Timestamp step_ts : steps) {
+        clock.advance_to(step_ts);
         ++result.steps;
 
         portfolio.process_pending(market);
@@ -56,13 +68,13 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
         // Margin is sampled rather than recomputed every observation: it needs an
         // implied-volatility solve per leg, and a per-second figure would cost
         // far more than the precision is worth.
-        if (ev.ts >= next_margin) {
+        if (step_ts >= next_margin) {
             const MarginResult m = ctx.margin();
             if (m.total.minor > result.peak_margin.minor) result.peak_margin = m.total;
-            next_margin = Timestamp{ev.ts.nanos + margin_interval};
+            next_margin = Timestamp{step_ts.nanos + margin_interval};
         }
 
-        const EvalCtx eval{&market, &portfolio, ev.ts};
+        const EvalCtx eval{&market, &portfolio, step_ts};
         int guard = 0;
         while (!task.done() && task.pending().valid()) {
             ++result.condition_evals;

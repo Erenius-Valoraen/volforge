@@ -43,6 +43,16 @@ struct GfdlLoadOptions {
 
     // Skip files whose underlying is not this, when set.
     std::string only_underlying;
+
+    // The session these files belong to. Every row must carry it.
+    //
+    // A vendor archive covers exactly one date, so a row claiming any other is
+    // corrupt. Enforcing that is not pedantry: a single mistyped year in one row
+    // of one file lands a timestamp thousands of years out, which silently
+    // reorders the session and poisons every result derived from it. Left unset,
+    // the date is taken from the archive name, and failing that from the first
+    // valid row.
+    Date expected_date;
 };
 
 struct GfdlDay {

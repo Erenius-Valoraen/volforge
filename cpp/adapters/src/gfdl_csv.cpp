@@ -135,24 +135,47 @@ struct RowSink {
     std::size_t*                        rows_read;
     std::size_t*                        rows_skipped;
     const InstrumentRegistry*           registry;
+    Date*                               expected;   // the one date this day may carry
 };
 
 Date parse_csv_rows(const char* data, std::size_t size, InstrumentId id,
                     const GfdlLoadOptions& options, const RowSink& sink) {
-    const char* p   = data;
-    const char* end = p + size;
+    const char* p = data;
+    const char* const buffer_end = data + size;
 
-    if (end - p > 6 && std::strncmp(p, "Ticker", 6) == 0) {
-        while (p < end && *p != '\n') ++p;
-        if (p < end) ++p;
+    if (buffer_end - p > 6 && std::strncmp(p, "Ticker", 6) == 0) {
+        while (p < buffer_end && *p != '\n') ++p;
+        if (p < buffer_end) ++p;
     }
 
     Date      row_date;
     Timestamp previous{};
     bool      have_previous = false;
 
-    while (p < end) {
-        if (*p == '\n' || *p == '\n') { ++p; continue; }
+    while (p < buffer_end) {
+        if (*p == '\r' || *p == '\n') { ++p; continue; }
+
+        // Bound every field to its own line, and require the row to carry all
+        // ten of them.
+        //
+        // Without this a row truncated mid-line reads its missing fields as
+        // zero, turning the last line of a cut-off file into a midnight print at
+        // a price of nothing — and one vendor archive ends exactly that way. The
+        // out-of-order check only catches it when a later row happens to follow,
+        // which is luck rather than a guarantee.
+        const char* scan = p;
+        int commas = 0;
+        while (scan < buffer_end && *scan != '\n' && *scan != '\r') {
+            if (*scan == ',') ++commas;
+            ++scan;
+        }
+        const char* const end = scan;          // no field may run past its line
+        auto next_line = [&] {
+            p = scan;
+            while (p < buffer_end && (*p == '\r' || *p == '\n')) ++p;
+        };
+
+        if (commas != 9) { ++*sink.rows_skipped; next_line(); continue; }
 
         skip_field(p, end);                                   // Ticker
 
@@ -185,16 +208,25 @@ Date parse_csv_rows(const char* data, std::size_t size, InstrumentId id,
         if (p < end && *p == ',') ++p;
         q.open_interest = scan_int(p, end);
 
-        while (p < end && *p != '\n') ++p;
-        if (p < end) ++p;
+        next_line();
 
-        if (yyyy < 1970 || mm < 1 || mm > 12 || dd < 1 || dd > 31 ||
+        // Bounded on both sides. An unbounded year is how "20266" slipped
+        // through and put a timestamp eighteen thousand years into the future.
+        if (yyyy < 1990 || yyyy > 2100 || mm < 1 || mm > 12 || dd < 1 || dd > 31 ||
             hh < 0 || hh > 23 || mi < 0 || mi > 59 || ss < 0 || ss > 59) {
             ++*sink.rows_skipped;
             continue;
         }
 
         const Date d{static_cast<std::int32_t>(yyyy * 10000 + mm * 100 + dd)};
+
+        // One archive is one session. Anything else is a damaged row, and
+        // admitting it would reorder the day.
+        if (sink.expected->valid()) {
+            if (d != *sink.expected) { ++*sink.rows_skipped; continue; }
+        } else {
+            *sink.expected = d;
+        }
         if (!row_date.valid()) row_date = d;
 
         q.ts = timestamp_of(d, static_cast<int>(hh * 3600 + mi * 60 + ss),
@@ -238,6 +270,7 @@ GfdlDay load_gfdl_day(InstrumentRegistry& registry, const std::string& directory
 
     std::set<std::int32_t> expiries;
     std::string buffer;
+    Date expected = options.expected_date;
 
     for (const fs::path& path : files) {
         const ParsedSymbol sym = parse_gfdl_symbol(path.filename().string());
@@ -275,7 +308,7 @@ GfdlDay load_gfdl_day(InstrumentRegistry& registry, const std::string& directory
         expiries.insert(sym.expiry.yyyymmdd);
 
         const RowSink sink{&out.session, &out.date, &out.rows_read, &out.rows_skipped,
-                           &registry};
+                           &registry, &expected};
         const Date row_date = parse_csv_rows(buffer.data(), buffer.size(), id, options, sink);
 
         ++out.files_read;
@@ -304,6 +337,28 @@ GfdlDay load_gfdl_zip(InstrumentRegistry& registry, const std::string& zip_path,
     if (!mz_zip_reader_init_file(&zip, zip_path.c_str(), 0)) {
         out.warnings.push_back("cannot open zip: " + zip_path);
         return out;
+    }
+
+    // GFDLNFO_TICK_DDMMYYYY.zip -- the archive names the session it covers, which
+    // is a stronger anchor than trusting whichever row happens to be read first.
+    Date expected = options.expected_date;
+    if (!expected.valid()) {
+        const auto slash = zip_path.find_last_of("/\\");
+        const std::string stem =
+            slash == std::string::npos ? zip_path : zip_path.substr(slash + 1);
+        const auto underscore = stem.find_last_of('_');
+        if (underscore != std::string::npos && stem.size() >= underscore + 9) {
+            const std::string digits = stem.substr(underscore + 1, 8);
+            if (digits.size() == 8 &&
+                std::all_of(digits.begin(), digits.end(), [](char c) { return is_digit(c); })) {
+                const int dd = std::stoi(digits.substr(0, 2));
+                const int mm = std::stoi(digits.substr(2, 2));
+                const int yy = std::stoi(digits.substr(4, 4));
+                if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12 && yy >= 1990 && yy <= 2100) {
+                    expected = Date{yy * 10000 + mm * 100 + dd};
+                }
+            }
+        }
     }
 
     const mz_uint count = mz_zip_reader_get_num_files(&zip);
@@ -360,7 +415,7 @@ GfdlDay load_gfdl_zip(InstrumentRegistry& registry, const std::string& zip_path,
         const InstrumentId id = registry.add(spec);
 
         const RowSink sink{&out.session, &out.date, &out.rows_read, &out.rows_skipped,
-                           &registry};
+                           &registry, &expected};
         const Date row_date =
             parse_csv_rows(static_cast<const char*>(raw), bytes, id, options, sink);
         mz_free(raw);

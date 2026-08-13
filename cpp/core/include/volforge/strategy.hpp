@@ -314,6 +314,10 @@ private:
     // Keyed by (instrument, interval, price source).
     mutable std::map<std::tuple<std::int32_t, int, int>,
                      std::shared_ptr<const BarSeries>> bar_cache_;
+
+    // Keyed by (expiry, instant): the same question asked twice at one moment
+    // has one answer.
+    mutable std::map<std::pair<std::int32_t, std::int64_t>, double> forward_cache_;
 };
 
 }  // namespace volforge

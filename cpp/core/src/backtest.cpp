@@ -105,16 +105,29 @@ BacktestResult run_backtest(DataSource& source, UnderlyingId underlying, Instrum
         Money     session_peak_margin{};
         Timestamp next_margin{std::numeric_limits<std::int64_t>::min()};
 
-        EventCursor cursor(*session);
-        Event       ev;
-        Timestamp   last{std::numeric_limits<std::int64_t>::min()};
+        // A source that keeps a timeline lets the day be stepped without touching
+        // a single quote. Merging events instead would decode every instrument,
+        // which is exactly what the lazy store exists to avoid.
+        const auto timeline = session->timeline();
+        std::vector<Timestamp> derived;
+        if (timeline.empty()) {
+            EventCursor cursor(*session);
+            Event ev;
+            Timestamp seen{std::numeric_limits<std::int64_t>::min()};
+            while (cursor.next(ev)) {
+                ++result.observations;
+                if (ev.ts == seen) continue;
+                seen = ev.ts;
+                derived.push_back(ev.ts);
+            }
+        } else {
+            result.observations += session->total_observations();
+        }
+        const std::span<const Timestamp> steps =
+            timeline.empty() ? std::span<const Timestamp>(derived) : timeline;
 
-        while (cursor.next(ev)) {
-            ++result.observations;
-            if (ev.ts == last) continue;
-            last = ev.ts;
-
-            clock.advance_to(ev.ts);
+        for (const Timestamp step_ts : steps) {
+            clock.advance_to(step_ts);
             ++result.steps;
 
             portfolio.process_pending(*market);
@@ -126,13 +139,13 @@ BacktestResult run_backtest(DataSource& source, UnderlyingId underlying, Instrum
 
             portfolio.process_risk_rules(*market);
 
-            if (ev.ts >= next_margin) {
+            if (step_ts >= next_margin) {
                 const MarginResult m = ctx.margin();
                 if (m.total.minor > session_peak_margin.minor) session_peak_margin = m.total;
-                next_margin = Timestamp{ev.ts.nanos + margin_interval};
+                next_margin = Timestamp{step_ts.nanos + margin_interval};
             }
 
-            const EvalCtx eval{&*market, &portfolio, ev.ts};
+            const EvalCtx eval{&*market, &portfolio, step_ts};
             int guard = 0;
             while (!task.done() && task.pending().valid()) {
                 if (!task.pending().eval(eval)) break;

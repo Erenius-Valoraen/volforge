@@ -132,6 +132,7 @@ void Ctx::bind_session(const SessionData& session, const MarketView& market, Dat
     // Cached series describe the session that just ended. Keeping them would let
     // a strategy read yesterday's bars today.
     bar_cache_.clear();
+    forward_cache_.clear();
 }
 
 std::optional<Price> Ctx::spot_price() const {
@@ -146,24 +147,97 @@ std::optional<double> Ctx::forward(Date expiry) const {
     const double t = time_to_expiry(now(), expiry, utc_offset_);
     if (!(t > 0.0)) return std::nullopt;
 
-    // Parity needs a call and a put at the same strike, both quoting now.
-    //
-    // The ChainView is a named local on purpose: strikes() returns a reference
-    // into it, and iterating that off a temporary reads freed memory once the
-    // full expression ends.
+    // Repeatedly asked at the same instant -- a chain query, then a Greek, then
+    // a delta selection all want it -- and each answer is identical.
+    const auto key = std::make_pair(expiry.yyyymmdd, now().nanos);
+    if (const auto hit = forward_cache_.find(key); hit != forward_cache_.end()) {
+        return hit->second;
+    }
+
     const ChainView view(*this, expiry);
-    std::vector<ParityQuote> pairs;
-    for (const Price strike : view.strikes()) {
-        const auto c = registry().find_option(underlying_, expiry, strike, Right::Call);
-        const auto p = registry().find_option(underlying_, expiry, strike, Right::Put);
-        if (!c || !p) continue;
+    const auto& strikes = view.strikes();
+    if (strikes.empty()) return std::nullopt;
+
+    // Call minus put at a strike is exactly DF*(F - K), so it falls strictly as
+    // the strike rises and crosses zero at the forward. Binary searching that
+    // crossing costs a handful of strikes instead of the whole chain, which
+    // matters because every strike touched has to be decoded off disk.
+    auto parity_at = [&](std::size_t i) -> std::optional<double> {
+        const auto c = registry().find_option(underlying_, expiry, strikes[i], Right::Call);
+        const auto p = registry().find_option(underlying_, expiry, strikes[i], Right::Put);
+        if (!c || !p) return std::nullopt;
         const auto cq = market_->quote(*c);
         const auto pq = market_->quote(*p);
-        if (!cq || !pq || !cq->two_sided() || !pq->two_sided()) continue;
-        pairs.push_back(ParityQuote{strike.to_double(), cq->mid().to_double(),
-                                    pq->mid().to_double()});
+        if (!cq || !pq || !cq->two_sided() || !pq->two_sided()) return std::nullopt;
+        return cq->mid().to_double() - pq->mid().to_double();
+    };
+
+    // Anchoring at the ends of the ladder would be the wrong place to start:
+    // the outermost strikes are exactly the ones with no two-sided quote. Begin
+    // in the middle, where the listed range is centred on the money and quotes
+    // are best, then walk outward in the direction the sign points.
+    auto usable_near = [&](std::size_t i) -> std::optional<std::pair<std::size_t, double>> {
+        const std::size_t n = strikes.size();
+        for (std::size_t step = 0; step < n; ++step) {
+            if (i + step < n) {
+                if (const auto d = parity_at(i + step)) return std::make_pair(i + step, *d);
+            }
+            if (step != 0 && i >= step) {
+                if (const auto d = parity_at(i - step)) return std::make_pair(i - step, *d);
+            }
+            if (step > 12) break;   // give up rather than scan the whole chain
+        }
+        return std::nullopt;
+    };
+
+    const auto anchor = usable_near(strikes.size() / 2);
+    if (!anchor) return std::nullopt;
+
+    std::size_t best = anchor->first;
+    double best_diff = anchor->second;
+
+    // Bracket the crossing by doubling outward from the anchor.
+    std::size_t lo = anchor->first, hi = anchor->first;
+    double lo_diff = anchor->second, hi_diff = anchor->second;
+
+    for (std::size_t stride = 1; stride < strikes.size(); stride *= 2) {
+        if (best_diff > 0.0) {                      // forward is above this strike
+            const std::size_t probe_at = best + stride;
+            if (probe_at >= strikes.size()) break;
+            const auto d = parity_at(probe_at);
+            if (!d) break;
+            lo = best; lo_diff = best_diff;
+            hi = probe_at; hi_diff = *d;
+            if (std::abs(*d) < std::abs(best_diff)) { best = probe_at; best_diff = *d; }
+            if (*d <= 0.0) break;                   // crossing bracketed
+        } else {
+            if (stride > best) break;
+            const std::size_t probe_at = best - stride;
+            const auto d = parity_at(probe_at);
+            if (!d) break;
+            hi = best; hi_diff = best_diff;
+            lo = probe_at; lo_diff = *d;
+            if (std::abs(*d) < std::abs(best_diff)) { best = probe_at; best_diff = *d; }
+            if (*d >= 0.0) break;
+        }
     }
-    return forward_from_parity(pairs.data(), pairs.size(), t, rate_);
+
+    // Then bisect the bracket.
+    while (hi > lo + 1) {
+        const std::size_t mid = lo + (hi - lo) / 2;
+        const auto d = parity_at(mid);
+        if (!d) break;
+        if (std::abs(*d) < std::abs(best_diff)) { best = mid; best_diff = *d; }
+        if (*d > 0.0) { lo = mid; lo_diff = *d; } else { hi = mid; hi_diff = *d; }
+    }
+    (void)lo_diff; (void)hi_diff;
+
+    const ParityQuote quote{strikes[best].to_double(), 0.0, 0.0};
+    const double fwd = quote.strike + std::exp(rate_ * t) * best_diff;
+    if (!(fwd > 0.0) || !std::isfinite(fwd)) return std::nullopt;
+
+    forward_cache_.emplace(key, fwd);
+    return fwd;
 }
 
 MarginResult Ctx::margin() const {
