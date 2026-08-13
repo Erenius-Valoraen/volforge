@@ -230,3 +230,68 @@ Positional scope makes several things mandatory rather than optional:
 Greeks and implied volatility are in v1. Contract selection is unconstrained — users select
 by delta, moneyness, premium, strike offset, open interest, spread, or any predicate they
 write.
+
+## 10. Accounting
+
+A backtest is only worth what its P&L means, so the accounting path was audited
+specifically for anything that flatters returns. Four defects were found and
+fixed; they are recorded here because each one is easy to reintroduce.
+
+### Marking
+
+Open legs mark at the price that would **close** them: a short at the ask it
+would be bought back at, a long at the bid it would be sold into. Marking at mid
+reports profit that closing would not realise.
+
+Two edge cases matter more than they look:
+
+- **A long option with no bid is worth nothing, and the loss is total.** An
+  earlier version returned zero P&L when the closing side was absent, which
+  deleted a 100% loss outright and stopped any percentage stop from ever firing.
+- **A short option with no offer cannot be bought back at zero.** Marking it
+  there would book the entire premium as profit. It falls back to the last trade,
+  and failing that refuses to claim a gain at all.
+
+### Costs
+
+Transaction costs are charged on every fill. Omitting them is one of the largest
+sources of overstated returns in Indian F&O: statutory charges alone run to
+roughly 0.14% of premium on a round trip, which decides whether a high-turnover
+intraday strategy makes money at all. In the sample straddle run they turn a
+gross loss of ₹5,587.50 into ₹5,719.30; on the Bollinger run they are about a
+third of the gross result.
+
+`CostModel` covers STT (sell side), exchange transaction charges, SEBI turnover
+fees, stamp duty (buy side), GST, and per-order brokerage. **The default rates
+were current at the time of writing and are configuration, not constants** —
+verify them against your broker's contract note.
+
+Results report `realized` (gross), `costs`, `net_realized`, `unrealized` and
+`final_equity` as separate lines, so the difference between what a strategy
+earned and what an account would have kept is never buried in one number.
+
+### Order lifecycle
+
+Closing a position **cancels its unfilled opening orders**. Previously a queued
+leg could fill after the position was closed, silently leaving a naked position
+the strategy never asked for and would never manage.
+
+### Size against displayed liquidity
+
+The feed carries top of book only, so an order larger than the displayed size
+would in reality walk into levels that cannot be seen. Such fills happen at the
+touch but are **counted and reported** as `oversized_fills`, because silently
+filling size that was never displayed is a liquidity claim the data cannot
+support.
+
+### Known limitations
+
+- Oversized fills are flagged, not rejected or penalised. With no depth data,
+  any slippage model beyond the touch would be invention.
+- Margin is not modelled yet. Positional short-premium returns are dominated by
+  capital usage, so return-on-capital is not yet meaningful.
+- Percentage stops are meaningless on a structure whose net premium is near zero,
+  since the denominator vanishes. Such positions need absolute stops, which do
+  not exist yet.
+- Vendor open interest reflects the previous day's close rather than live
+  positioning, so any selection keyed on OI is using a stale figure.

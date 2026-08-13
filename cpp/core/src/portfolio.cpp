@@ -54,11 +54,22 @@ Money Position::pnl_of(std::size_t i, const MarketView& market) const {
     }
 
     const auto q = market.quote(l.instrument);
-    if (!q) return Money{};
+    if (!q) return Money{};   // never printed; impossible for a filled leg
 
     // Mark at the side that would close this leg, not at mid.
-    const Price mark = l.qty < 0 ? q->ask : q->bid;
-    if (mark.minor <= 0) return Money{};
+    Price mark = l.qty < 0 ? q->ask : q->bid;
+
+    if (mark.minor <= 0) {
+        if (l.qty < 0) {
+            // Short with no offer. Buying back at zero would book a fictitious
+            // full profit, so fall back to the last trade and, failing that,
+            // refuse to claim any gain at all.
+            mark = q->last.minor > 0 ? q->last : l.entry;
+        }
+        // Long with a zero bid is a real mark: the option is worthless and the
+        // loss is total. Reporting zero here would delete a 100% loss and stop
+        // any percentage stop from ever firing.
+    }
     return notional(mark, l.qty) - notional(l.entry, l.qty);
 }
 
@@ -87,8 +98,9 @@ double Position::pnl_pct(const MarketView& market) const {
 // Portfolio
 // ---------------------------------------------------------------------------
 
-Portfolio::Portfolio(std::shared_ptr<const FillModel> fills, std::int64_t execution_delay_nanos)
-    : fills_(std::move(fills)), delay_(execution_delay_nanos) {
+Portfolio::Portfolio(std::shared_ptr<const FillModel> fills, std::int64_t execution_delay_nanos,
+                     CostModel costs)
+    : fills_(std::move(fills)), delay_(execution_delay_nanos), costs_(costs) {
     if (!fills_) throw std::invalid_argument("Portfolio: null fill model");
     if (delay_ < 0) throw std::invalid_argument("Portfolio: negative execution delay");
 }
@@ -125,6 +137,22 @@ PositionId Portfolio::submit_open(std::string label,
 
 void Portfolio::submit_close(PositionId id, Timestamp now) {
     Position& pos = at(id);
+
+    // Cancel opening orders that have not filled. Leaving them queued would let
+    // a leg open *after* the position was closed, silently leaving a naked
+    // position the strategy never asked for and never manages.
+    std::vector<PendingOrder> keep;
+    keep.reserve(pending_.size());
+    for (const PendingOrder& o : pending_) {
+        if (o.position == id && !o.closing) {
+            pos.legs()[o.leg_index].state = LegState::Cancelled;
+            ++cancelled_orders_;
+            continue;
+        }
+        keep.push_back(o);
+    }
+    pending_.swap(keep);
+
     for (std::size_t i = 0; i < pos.legs().size(); ++i) {
         if (pos.legs()[i].state == LegState::Open) submit_close_leg(id, i, now);
     }
@@ -171,6 +199,18 @@ void Portfolio::process_pending(const MarketView& market) {
             mid > 0.0 && q->spread().to_double() / mid > fills_->illiquid_spread_ratio();
         if (illiquid) ++illiquid_fills_;
 
+        // Displayed size at the touch. The feed carries top of book only, so an
+        // order larger than what is shown would in reality walk into levels we
+        // cannot see. It is filled at the touch and flagged, because silently
+        // filling size that was never displayed is a liquidity claim the data
+        // does not support.
+        const Qty displayed = order.side == Side::Buy ? q->ask_qty : q->bid_qty;
+        const bool oversized = displayed > 0 && order.qty > displayed;
+        if (oversized) ++oversized_fills_;
+
+        const Money cost = costs_.cost_of(*price, order.qty, order.side);
+        total_costs_ = total_costs_ + cost;
+
         Position& pos = positions_[static_cast<std::size_t>(order.position)];
         Leg& leg = pos.legs()[order.leg_index];
 
@@ -186,8 +226,8 @@ void Portfolio::process_pending(const MarketView& market) {
         }
 
         trades_.push_back(TradeRecord{order.submitted_at, now, order.position, order.instrument,
-                                      order.side, order.qty, *price, illiquid,
-                                      order.from_rule});
+                                      order.side, order.qty, *price, cost, illiquid,
+                                      order.from_rule, oversized});
     }
 
     pending_.swap(still_pending);
@@ -199,18 +239,18 @@ void Portfolio::process_pending(const MarketView& market) {
 
 void Portfolio::attach_stop_loss(PositionId id, std::optional<std::size_t> leg, double pct) {
     if (pct <= 0.0) throw std::invalid_argument("stop_loss: pct must be positive magnitude");
-    at(id);   // validates
+    (void)at(id);   // validates the id, throws if unknown
     rules_.push_back(RiskRule{RiskRule::Kind::StopLossPct, id, leg, pct, Timestamp{}, false});
 }
 
 void Portfolio::attach_take_profit(PositionId id, std::optional<std::size_t> leg, double pct) {
     if (pct <= 0.0) throw std::invalid_argument("take_profit: pct must be positive magnitude");
-    at(id);
+    (void)at(id);
     rules_.push_back(RiskRule{RiskRule::Kind::TakeProfitPct, id, leg, pct, Timestamp{}, false});
 }
 
 void Portfolio::attach_exit_at(PositionId id, std::optional<std::size_t> leg, Timestamp when) {
-    at(id);
+    (void)at(id);
     rules_.push_back(RiskRule{RiskRule::Kind::ExitAt, id, leg, 0.0, when, false});
 }
 
@@ -292,7 +332,27 @@ Money Portfolio::unrealized(const MarketView& market) const {
 }
 
 Money Portfolio::equity(const MarketView& market) const {
-    return realized_ + unrealized(market);
+    // Net of costs. Gross figures are available separately so the difference is
+    // always visible rather than buried.
+    return realized_ - total_costs_ + unrealized(market);
+}
+
+// ---------------------------------------------------------------------------
+// Costs
+// ---------------------------------------------------------------------------
+
+Money CostModel::cost_of(Price price, Qty qty, Side side) const {
+    const double premium = price.to_double() * static_cast<double>(qty);
+    if (!(premium > 0.0)) return brokerage_per_order;
+
+    double charges = premium * exchange_pct + premium * sebi_pct;
+    double taxes   = side == Side::Sell ? premium * stt_sell_pct : premium * stamp_buy_pct;
+
+    const double brokerage = static_cast<double>(brokerage_per_order.minor) / 100.0;
+    const double gst = (brokerage + charges) * gst_pct;
+
+    const double total = brokerage + charges + taxes + gst;
+    return Money{static_cast<std::int64_t>(std::llround(total * 100.0))};
 }
 
 }  // namespace volforge

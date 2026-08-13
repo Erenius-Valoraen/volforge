@@ -12,6 +12,7 @@ add_library(volforge_core
     src/bars.cpp
     src/indicators.cpp
     src/lookahead.cpp
+    src/greeks.cpp
 )
 
 target_include_directories(volforge_core PUBLIC

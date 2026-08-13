@@ -53,6 +53,31 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// Costs
+// ---------------------------------------------------------------------------
+
+// Transaction costs, applied to every fill.
+//
+// Omitting these is one of the largest sources of overstated returns in Indian
+// F&O backtesting: statutory charges alone run to roughly 0.14% of premium on a
+// round trip, which on a high-turnover intraday strategy is the difference
+// between a profitable system and a losing one.
+//
+// **Rates change.** These defaults were current for NSE equity options at the
+// time of writing and are the caller's responsibility to verify — they are
+// configuration, not constants.
+struct CostModel {
+    double stt_sell_pct   = 0.0010;      // 0.10% of premium, sell side only
+    double exchange_pct   = 0.00035;     // NSE transaction charge on premium
+    double sebi_pct       = 0.000001;    // ~Rs 10 per crore
+    double stamp_buy_pct  = 0.00003;     // 0.003% of premium, buy side only
+    double gst_pct        = 0.18;        // on brokerage + exchange + SEBI
+    Money  brokerage_per_order{2000};    // Rs 20.00, in minor units
+
+    [[nodiscard]] Money cost_of(Price price, Qty qty, Side side) const;
+};
+
+// ---------------------------------------------------------------------------
 // Legs
 // ---------------------------------------------------------------------------
 
@@ -61,6 +86,7 @@ enum class LegState : std::uint8_t {
     Open,
     PendingClose,
     Closed,
+    Cancelled,     // opening order withdrawn before it filled
 };
 
 struct Leg {
@@ -81,6 +107,7 @@ struct Leg {
     [[nodiscard]] bool live() const {
         return state == LegState::Open || state == LegState::PendingClose;
     }
+    [[nodiscard]] bool cancelled() const { return state == LegState::Cancelled; }
     [[nodiscard]] Side closing_side() const { return qty < 0 ? Side::Buy : Side::Sell; }
 };
 
@@ -167,8 +194,10 @@ struct TradeRecord {
     Side         side       = Side::Buy;
     Qty          qty        = 0;
     Price        price;
-    bool         illiquid   = false;
+    Money        cost;                 // statutory charges and brokerage
+    bool         illiquid   = false;   // filled across a suspiciously wide spread
     bool         from_rule  = false;   // closed by an attached risk rule
+    bool         oversized  = false;   // larger than the size displayed at the touch
 };
 
 // ---------------------------------------------------------------------------
@@ -181,7 +210,8 @@ public:
     // base interval by default. Zero is permitted but means "a resting order was
     // already at the touch", which is a claim about infrastructure rather than a
     // parameter to tune, so it is recorded in the run manifest.
-    Portfolio(std::shared_ptr<const FillModel> fills, std::int64_t execution_delay_nanos);
+    Portfolio(std::shared_ptr<const FillModel> fills, std::int64_t execution_delay_nanos,
+              CostModel costs = {});
 
     // Submits the opening legs. Returns the position id immediately; the legs are
     // PendingOpen until process_pending fills them at a later timestamp.
@@ -214,12 +244,17 @@ public:
     [[nodiscard]] std::size_t size() const { return positions_.size(); }
     [[nodiscard]] std::size_t pending_orders() const { return pending_.size(); }
 
+    // Gross realised P&L, before costs.
     [[nodiscard]] Money realized() const { return realized_; }
+    [[nodiscard]] Money costs() const { return total_costs_; }
+    [[nodiscard]] Money net_realized() const { return realized_ - total_costs_; }
     [[nodiscard]] Money unrealized(const MarketView& market) const;
     [[nodiscard]] Money equity(const MarketView& market) const;
 
     [[nodiscard]] const std::vector<TradeRecord>& trades() const { return trades_; }
     [[nodiscard]] std::size_t illiquid_fills() const { return illiquid_fills_; }
+    [[nodiscard]] std::size_t oversized_fills() const { return oversized_fills_; }
+    [[nodiscard]] std::size_t cancelled_orders() const { return cancelled_orders_; }
     [[nodiscard]] std::int64_t execution_delay_nanos() const { return delay_; }
 
 private:
@@ -232,7 +267,11 @@ private:
     std::vector<RiskRule>            rules_;
     std::vector<TradeRecord>         trades_;
     Money                            realized_{};
-    std::size_t                      illiquid_fills_ = 0;
+    CostModel                        costs_;
+    Money                            total_costs_{};
+    std::size_t                      illiquid_fills_  = 0;
+    std::size_t                      oversized_fills_ = 0;
+    std::size_t                      cancelled_orders_ = 0;
     std::size_t                      rules_fired_    = 0;
     bool                             closing_from_rule_ = false;
 };

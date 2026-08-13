@@ -7,6 +7,7 @@
 #pragma once
 
 #include "volforge/condition.hpp"
+#include "volforge/greeks.hpp"
 #include "volforge/indicators.hpp"
 #include "volforge/portfolio.hpp"
 
@@ -125,6 +126,14 @@ public:
     [[nodiscard]] std::vector<InstrumentId> straddle(int offset = 0) const;
     [[nodiscard]] std::vector<InstrumentId> strangle(int width) const;
 
+    // The strike whose |delta| is closest to `target`, e.g. 0.16 for the
+    // conventional one-standard-deviation short. Strikes whose implied
+    // volatility cannot be solved are skipped rather than guessed at.
+    [[nodiscard]] std::optional<InstrumentId> by_delta(double target, Right right) const;
+
+    // Delta-selected strangle: short call and put at matching |delta|.
+    [[nodiscard]] std::vector<InstrumentId> strangle_by_delta(double target) const;
+
 private:
     const Ctx*         ctx_;
     Date               expiry_;
@@ -192,7 +201,7 @@ class Ctx {
 public:
     Ctx(const SessionData& session, const MarketView& market, Portfolio& portfolio,
         UnderlyingId underlying, InstrumentId spot, Date date, int utc_offset_seconds,
-        int session_open_sec);
+        int session_open_sec, double rate);
 
     [[nodiscard]] Timestamp now() const { return market_->now(); }
     [[nodiscard]] const MarketView& market() const { return *market_; }
@@ -205,6 +214,18 @@ public:
     [[nodiscard]] Timestamp session_anchor() const { return anchor_; }
 
     [[nodiscard]] std::optional<Price> spot_price() const;
+
+    // --- pricing -----------------------------------------------------------
+
+    [[nodiscard]] double rate() const { return rate_; }
+
+    // Forward for an expiry, recovered from the chain by put-call parity. Needs
+    // no index or futures feed.
+    [[nodiscard]] std::optional<double> forward(Date expiry) const;
+
+    // Implied volatility and Greeks for one option, from its current mid.
+    // nullopt when the quote is one-sided, or when no volatility reproduces it.
+    [[nodiscard]] std::optional<GreekSet> greeks(InstrumentId id) const;
 
     [[nodiscard]] ChainView chain() const;
     [[nodiscard]] ChainView chain(Date expiry) const;
@@ -255,6 +276,7 @@ private:
     Date                      date_;
     int                       utc_offset_;
     Timestamp                 anchor_;
+    double                    rate_;
 
     // Keyed by (instrument, interval, price source).
     mutable std::map<std::tuple<std::int32_t, int, int>,

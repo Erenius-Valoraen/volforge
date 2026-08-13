@@ -42,18 +42,30 @@ struct RunConfig {
     // Session open, local time. Bar boundaries are anchored here so they follow
     // the trading session rather than wall-clock arithmetic.
     int session_open_sec = 9 * 3600 + 15 * 60;
+
+    // Annualised risk-free rate used for discounting and implied volatility.
+    double rate = 0.065;
+
+    // Statutory charges and brokerage. Verify the rates against your broker;
+    // they are configuration, not constants.
+    CostModel costs;
 };
 
 struct RunResult {
     Date        date;
-    Money       realized{};
-    Money       final_equity{};
+    Money       realized{};        // gross, before costs
+    Money       costs{};           // statutory charges and brokerage
+    Money       net_realized{};    // realized - costs
+    Money       unrealized{};      // open positions marked at exit-side prices
+    Money       final_equity{};    // net_realized + unrealized
     std::size_t observations     = 0;   // rows walked
     std::size_t steps            = 0;   // distinct timestamps
     std::size_t condition_evals  = 0;
     std::size_t resumes          = 0;   // times strategy code was entered
     std::size_t trades           = 0;
-    std::size_t illiquid_fills   = 0;
+    std::size_t illiquid_fills   = 0;   // filled across a very wide spread
+    std::size_t oversized_fills  = 0;   // larger than the size displayed at the touch
+    std::size_t cancelled_orders = 0;   // opening orders withdrawn on close
     std::size_t rules_fired      = 0;   // attached stops/targets that triggered
     std::size_t unfilled_orders  = 0;   // still pending at session end
     std::size_t open_positions   = 0;   // still live at session end

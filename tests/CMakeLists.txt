@@ -4,6 +4,8 @@ add_executable(volforge_tests
     test_event_loop.cpp
     test_lookahead.cpp
     test_risk_rules.cpp
+    test_greeks.cpp
+    test_accounting.cpp
 )
 
 target_link_libraries(volforge_tests PRIVATE volforge::core)

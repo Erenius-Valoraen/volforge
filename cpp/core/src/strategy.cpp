@@ -75,16 +75,40 @@ std::vector<InstrumentId> ChainView::strangle(int width) const {
     return {*call, *put};
 }
 
+std::optional<InstrumentId> ChainView::by_delta(double target, Right right) const {
+    const double want = std::abs(target);
+    std::optional<InstrumentId> best;
+    double best_gap = 0.0;
+
+    for (const Price strike : strikes_) {
+        const auto id = option(strike, right);
+        if (!id) continue;
+        const auto g = ctx_->greeks(*id);
+        if (!g) continue;   // unsolvable iv: skipped, never guessed
+
+        const double gap = std::abs(std::abs(g->delta) - want);
+        if (!best || gap < best_gap) { best = id; best_gap = gap; }
+    }
+    return best;
+}
+
+std::vector<InstrumentId> ChainView::strangle_by_delta(double target) const {
+    const auto call = by_delta(target, Right::Call);
+    const auto put  = by_delta(target, Right::Put);
+    if (!call || !put) return {};
+    return {*call, *put};
+}
+
 // ---------------------------------------------------------------------------
 // Ctx
 // ---------------------------------------------------------------------------
 
 Ctx::Ctx(const SessionData& session, const MarketView& market, Portfolio& portfolio,
          UnderlyingId underlying, InstrumentId spot, Date date, int utc_offset_seconds,
-         int session_open_sec)
+         int session_open_sec, double rate)
     : session_(&session), market_(&market), portfolio_(&portfolio),
       underlying_(underlying), spot_(spot), date_(date), utc_offset_(utc_offset_seconds),
-      anchor_(timestamp_of(date, session_open_sec, utc_offset_seconds)) {}
+      anchor_(timestamp_of(date, session_open_sec, utc_offset_seconds)), rate_(rate) {}
 
 std::optional<Price> Ctx::spot_price() const {
     const auto q = market_->quote(spot_);
@@ -93,6 +117,50 @@ std::optional<Price> Ctx::spot_price() const {
 }
 
 std::vector<Date> Ctx::expiries() const { return registry().expiries(underlying_); }
+
+std::optional<double> Ctx::forward(Date expiry) const {
+    const double t = time_to_expiry(now(), expiry, utc_offset_);
+    if (!(t > 0.0)) return std::nullopt;
+
+    // Parity needs a call and a put at the same strike, both quoting now.
+    //
+    // The ChainView is a named local on purpose: strikes() returns a reference
+    // into it, and iterating that off a temporary reads freed memory once the
+    // full expression ends.
+    const ChainView view(*this, expiry);
+    std::vector<ParityQuote> pairs;
+    for (const Price strike : view.strikes()) {
+        const auto c = registry().find_option(underlying_, expiry, strike, Right::Call);
+        const auto p = registry().find_option(underlying_, expiry, strike, Right::Put);
+        if (!c || !p) continue;
+        const auto cq = market_->quote(*c);
+        const auto pq = market_->quote(*p);
+        if (!cq || !pq || !cq->two_sided() || !pq->two_sided()) continue;
+        pairs.push_back(ParityQuote{strike.to_double(), cq->mid().to_double(),
+                                    pq->mid().to_double()});
+    }
+    return forward_from_parity(pairs.data(), pairs.size(), t, rate_);
+}
+
+std::optional<GreekSet> Ctx::greeks(InstrumentId id) const {
+    const InstrumentSpec& spec = registry().spec(id);
+    if (!spec.is_option()) return std::nullopt;
+
+    const auto q = market_->quote(id);
+    if (!q || !q->two_sided()) return std::nullopt;
+
+    const auto fwd = forward(spec.expiry);
+    if (!fwd) return std::nullopt;
+
+    const double t = time_to_expiry(now(), spec.expiry, utc_offset_);
+    if (!(t > 0.0)) return std::nullopt;
+
+    // Solved from the mid. On a wide wing the mid is not a tradeable price, so
+    // the resulting Greeks describe the quote rather than an execution — which
+    // is the right convention for selection, and the wrong one for P&L.
+    return implied_greeks(q->mid().to_double(), *fwd, spec.strike.to_double(), t, rate_,
+                          spec.right);
+}
 
 ChainView Ctx::chain(Date expiry) const { return ChainView(*this, expiry); }
 

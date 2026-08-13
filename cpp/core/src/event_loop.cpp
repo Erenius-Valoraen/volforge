@@ -12,10 +12,10 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
 
     ReplayClock clock;
     MarketView  market(session, clock);
-    Portfolio   portfolio(fills, config.execution_delay_nanos);
+    Portfolio   portfolio(fills, config.execution_delay_nanos, config.costs);
 
     Ctx ctx(session, market, portfolio, underlying, spot, session.date(), kISTOffsetSeconds,
-            config.session_open_sec);
+            config.session_open_sec, config.rate);
 
     StrategyTask task = strategy(ctx);
     if (!task.valid()) throw std::invalid_argument("run_session: strategy produced no task");
@@ -70,9 +70,14 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
     result.strategy_finished = task.done();
     result.unfilled_orders   = portfolio.pending_orders();
     result.realized          = portfolio.realized();
+    result.costs             = portfolio.costs();
+    result.net_realized      = portfolio.net_realized();
+    result.unrealized        = portfolio.unrealized(market);
     result.final_equity      = portfolio.equity(market);
     result.trades            = portfolio.trades().size();
     result.illiquid_fills    = portfolio.illiquid_fills();
+    result.oversized_fills   = portfolio.oversized_fills();
+    result.cancelled_orders  = portfolio.cancelled_orders();
     result.trade_log         = portfolio.trades();
     result.rules_fired       = portfolio.rules_fired();
 

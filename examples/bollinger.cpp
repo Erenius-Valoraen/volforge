@@ -64,8 +64,9 @@ void report(const char* name, const SyntheticSession& synth, InstrumentRegistry&
     const auto result = run_session(*synth.data, synth.underlying, synth.spot, fn);
 
     std::printf("%s\n", name);
-    std::printf("  resumes %zu   trades %zu   realized %10.2f\n",
-                result.resumes, result.trades, result.realized.to_double());
+    std::printf("  resumes %zu   trades %zu   gross %9.2f  costs %7.2f  net %9.2f\n",
+                result.resumes, result.trades, result.realized.to_double(),
+                result.costs.to_double(), result.net_realized.to_double());
 
     for (const TradeRecord& t : result.trade_log) {
         const InstrumentSpec& s = registry.spec(t.instrument);

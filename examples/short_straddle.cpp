@@ -63,12 +63,16 @@ int main() {
                 result.resumes);
     std::printf("  trades            %10zu\n", result.trades);
     std::printf("  illiquid fills    %10zu\n", result.illiquid_fills);
+    std::printf("  oversized fills   %10zu\n", result.oversized_fills);
     std::printf("  unfilled orders   %10zu\n", result.unfilled_orders);
     std::printf("  open at close     %10zu\n", result.open_positions);
     std::printf("  strategy finished %10s\n\n", result.strategy_finished ? "yes" : "no");
 
-    std::printf("  realized      %12.2f\n", result.realized.to_double());
-    std::printf("  final equity  %12.2f\n\n", result.final_equity.to_double());
+    std::printf("  gross realized %11.2f\n", result.realized.to_double());
+    std::printf("  costs          %11.2f\n", -result.costs.to_double());
+    std::printf("  net realized   %11.2f\n", result.net_realized.to_double());
+    std::printf("  unrealized     %11.2f\n", result.unrealized.to_double());
+    std::printf("  final equity   %11.2f\n\n", result.final_equity.to_double());
 
     // The two timestamp columns are the point. A decision at 09:20:00 does not
     // execute at 09:20:00 — it executes against the next observation.
