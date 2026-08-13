@@ -141,8 +141,52 @@ classic version of this bug: it trades at 09:20:00 on information from 09:21:00.
 - A condition whose confirmation policy is ambiguous — `cross_above` on a bar
   series requires `confirm` to be stated.
 
-## 6. Status
+## 6. The detector
 
-The order timing model in section 4 is implemented. Bars, indicators and the
-`confirm` policy in sections 1–3 are specified here and not yet built; they are
-the next layer, and the interfaces above are shaped to accept them.
+Rules are only worth what enforces them, so the engine ships a whole-strategy
+look-ahead check built on one theorem:
+
+> A causal strategy's behaviour over [0, T] cannot depend on any data after T.
+
+`check_lookahead` truncates the session at many cutoffs, replays the strategy
+against each prefix, and compares the resulting trades against the full run's
+trades up to that cutoff. Every field must match — which trades happened, when
+they were signalled, when they filled, at what price. Cutoffs are sampled
+deterministically and always include the boundaries either side of every fill.
+
+The value of this approach is that it assumes nothing about *where* a leak might
+be. An indicator averaging over the forming bar, a chain query selecting a strike
+that lists later in the day, a condition reading a bar before it closes, a fill
+taken from the triggering print — all of them change behaviour under truncation,
+and none of them have to be anticipated.
+
+It is guarded by its own tests: two deliberately cheating strategies are checked
+to make sure the detector flags them. A detector that cannot catch a known leak
+is worse than none, because it manufactures confidence.
+
+### What it does not prove
+
+- It only sees leaks that change **trades**. A strategy computing a biased signal
+  it never acts on passes.
+- Coverage is only as good as the cutoffs sampled.
+- A clean report means "no leak was observed at these cutoffs", never "this
+  strategy is causal".
+
+## 7. Status
+
+Sections 1–4 and the detector are implemented and tested: bar timing, indicator
+knowability, both confirmation policies, order timing, and truncation-based
+detection.
+
+Worked example from the test suite, using twenty flat one-minute bars that put
+the upper band at exactly 100, then a minute that touches 105 and closes back at
+99, then a minute closing at 110:
+
+| | Instant | Bar-close |
+|---|---|---|
+| Signals at | 09:35:30 — the second of the touch | 09:37:00 |
+| The 09:35 poke | Traded | **Ignored** — it closed back below |
+| Fill | 09:35:31 | 09:37:01 |
+
+Note that the bar-close signal lands at 09:37:00, which is the 09:36 bar's
+`open_time + 60s`. Not 09:36, and not anywhere inside the bar that produced it.

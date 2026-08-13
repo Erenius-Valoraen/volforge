@@ -14,8 +14,8 @@ RunResult run_session(const SessionData& session, UnderlyingId underlying, Instr
     MarketView  market(session, clock);
     Portfolio   portfolio(fills, config.execution_delay_nanos);
 
-    Ctx ctx(market, portfolio, session.registry(), underlying, spot, session.date(),
-            kISTOffsetSeconds);
+    Ctx ctx(session, market, portfolio, underlying, spot, session.date(), kISTOffsetSeconds,
+            config.session_open_sec);
 
     StrategyTask task = strategy(ctx);
     if (!task.valid()) throw std::invalid_argument("run_session: strategy produced no task");

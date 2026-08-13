@@ -2,12 +2,13 @@
 
 A backtesting engine for options, built for people who need to trust the result.
 
-> **Status: early, but it runs.** A strategy executes end to end in C++ — data interface,
-> event loop, coroutine strategies, orders, fills and position P&L, against generated data.
-> Indicators, bars and multi-timeframe, margin, Greeks and the Python layer are not written
-> yet, so this is not usable for real backtesting.
+> **Status: early, but it runs.** Strategies execute end to end in C++ — data interface,
+> event loop, coroutines, bars and multi-timeframe, indicators, orders, fills and position
+> P&L, plus a whole-strategy look-ahead detector. Margin, Greeks, the storage layer and the
+> Python layer are not written yet, so this is not usable for real backtesting.
 >
-> See [examples/short_straddle.cpp](examples/short_straddle.cpp) for a working strategy.
+> Working examples: [short_straddle.cpp](examples/short_straddle.cpp),
+> [bollinger.cpp](examples/bollinger.cpp).
 >
 > The storage layer is deliberately unspecified pending a vendor format decision; the engine
 > is written against the abstraction, not the format.
@@ -25,7 +26,13 @@ able to read exactly which fill, margin, and causality rules produced that numbe
 
 ## Design principles
 
-**Look-ahead is impossible, not merely discouraged.** There is no accessor for data after the
+**Look-ahead is checked, not asserted.** `check_lookahead` replays a strategy against
+progressively truncated sessions and compares the trades, resting on a simple theorem: a
+causal strategy's behaviour over [0, T] cannot depend on data after T. It assumes nothing
+about where a leak might be, and it is guarded by its own tests — two deliberately cheating
+strategies verify the detector actually catches leaks.
+
+**Look-ahead is hard to write by accident.** There is no accessor for data after the
 current simulation time — `close[-1]` raises rather than returning a value. Custom indicators
 are pure functions, so the engine verifies causality automatically by checking
 `f(data[:k]) == f(data)[:k]` for random `k`, and rejects any indicator that peeks. Higher

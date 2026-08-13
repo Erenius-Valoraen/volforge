@@ -9,6 +9,9 @@ add_library(volforge_core
     src/portfolio.cpp
     src/strategy.cpp
     src/event_loop.cpp
+    src/bars.cpp
+    src/indicators.cpp
+    src/lookahead.cpp
 )
 
 target_include_directories(volforge_core PUBLIC

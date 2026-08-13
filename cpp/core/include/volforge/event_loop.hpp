@@ -38,6 +38,10 @@ struct RunConfig {
     // A strategy that resumes this many times within one timestamp is spinning
     // on an always-true condition rather than waiting for the market.
     int max_resumes_per_step = 64;
+
+    // Session open, local time. Bar boundaries are anchored here so they follow
+    // the trading session rather than wall-clock arithmetic.
+    int session_open_sec = 9 * 3600 + 15 * 60;
 };
 
 struct RunResult {
