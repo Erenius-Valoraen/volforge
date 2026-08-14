@@ -33,6 +33,7 @@ import inspect
 from typing import Any, Callable
 
 from . import _volforge as _core
+from .analysis import Drawdown, Performance, analyze
 from ._volforge import (  # re-exported value types
     BacktestConfig,
     BarPrice,
@@ -53,6 +54,9 @@ PUT = Right.PUT
 __all__ = [
     "strategy",
     "backtest",
+    "analyze",
+    "Performance",
+    "Drawdown",
     "synthetic",
     "load_gfdl",
     "open_store",
